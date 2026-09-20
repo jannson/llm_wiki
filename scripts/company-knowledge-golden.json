@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "questions": [
+    {
+      "id": "employees-and-aliases",
+      "question": "公司现在有哪些员工？gzh、xiaoguo 和 guozhihao 是谁？",
+      "expect": { "employeeCount": 8, "employeeId": "mickeysir", "aliases": ["gzh", "xiaoguo", "guozhihao"] }
+    },
+    {
+      "id": "business-owner",
+      "question": "DDNSTO 业务由谁负责？",
+      "expect": { "metaId": "ddnsto", "owner": "luyong" }
+    },
+    {
+      "id": "current-strategy",
+      "question": "当前公司战略是什么，哪些还未确认？",
+      "expect": { "recordId": "STRAT-2026-001", "status": "draft" }
+    },
+    {
+      "id": "accepted-decision",
+      "question": "公司知识和项目经营知识如何分工？",
+      "expect": { "recordId": "CDEC-2026-001", "status": "accepted" }
+    },
+    {
+      "id": "unknown-priority",
+      "question": "现在公司最优先的业务是哪个？",
+      "expect": { "priorityStatus": "unverified", "mustHaveKnowledgeGap": true }
+    }
+  ]
+}

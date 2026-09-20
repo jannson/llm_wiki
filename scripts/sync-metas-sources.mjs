@@ -65,15 +65,18 @@ function shouldInclude(relativePath, directoryEntry) {
   return INCLUDED_EXTENSIONS.has(path.extname(lowerName))
 }
 
-async function collectFiles(root, relativeDirectory = "") {
+async function collectFiles(root, relativeDirectory = "", includeRelativePath = () => true) {
   const absoluteDirectory = path.join(root, relativeDirectory)
   const entries = await readdir(absoluteDirectory, { withFileTypes: true })
   const files = []
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     const relativePath = path.join(relativeDirectory, entry.name)
     if (!shouldInclude(relativePath, entry)) continue
-    if (entry.isDirectory()) files.push(...(await collectFiles(root, relativePath)))
-    else files.push(normalizeRelative(relativePath))
+    if (entry.isDirectory()) files.push(...(await collectFiles(root, relativePath, includeRelativePath)))
+    else {
+      const normalized = normalizeRelative(relativePath)
+      if (includeRelativePath(normalized)) files.push(normalized)
+    }
   }
   return files
 }
@@ -274,7 +277,7 @@ async function syncSourceCatalog({ catalog, localBindings, stateRoot, projectRoo
   return sources.length
 }
 
-export async function syncMetasSources({ source, project, metaId, catalog, localBindings }) {
+export async function syncMetasSources({ source, project, metaId, catalog, localBindings, includeRelativePath }) {
   const sourceRoot = path.resolve(source)
   const projectRoot = path.resolve(project)
   const sourceInfo = await stat(sourceRoot)
@@ -288,7 +291,7 @@ export async function syncMetasSources({ source, project, metaId, catalog, local
   const manifestPath = path.join(stateRoot, `${metaId}.manifest.json`)
   const recordsPath = path.join(stateRoot, `${metaId}.records.json`)
   const previous = await readJson(manifestPath, { files: {} })
-  const relativeFiles = await collectFiles(sourceRoot)
+  const relativeFiles = await collectFiles(sourceRoot, "", includeRelativePath)
   const currentFiles = {}
   const records = []
   const recordKeys = new Set()
@@ -343,7 +346,7 @@ export async function syncMetasSources({ source, project, metaId, catalog, local
   await writeJsonAtomic(manifestPath, {
     version: 1,
     metaId,
-    sourceRoot,
+    sourceLabel: metaId,
     syncedAt: new Date().toISOString(),
     files: currentFiles,
   })
