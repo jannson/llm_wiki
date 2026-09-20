@@ -3,6 +3,7 @@ mod api_server;
 mod clip_server;
 mod commands;
 mod cors;
+mod metas_query;
 mod panic_guard;
 mod proxy;
 mod server_bind;

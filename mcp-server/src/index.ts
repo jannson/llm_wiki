@@ -16,12 +16,24 @@ import {
   type ApiChatResponse,
   type ApiSearchResult,
   type ApiProject,
+  type ApiMetasQueryOptions,
 } from "./api-client.js"
 import { VERSION } from "./version.js"
 import { McpProjectBinding, withActiveProject } from "./project-binding.js"
 
 const DEFAULT_PROJECT_ID = "current"
 const MAX_TEXT_BYTES = 120_000
+
+const METAS_FILTER_PROPERTIES = {
+  project_id: { type: "string", description: "Project UUID, project path, or 'current'. Defaults to current." },
+  meta_id: { type: "string", description: "Optional stable business/meta id, for example ddnsto." },
+  owner: { type: "string", description: "Optional exact owner id, matched case-insensitively." },
+  status: { type: "string", description: "Optional exact authoritative status." },
+  priority: { type: "string", description: "Optional exact authoritative priority." },
+  date_from: { type: "string", description: "Optional inclusive business-date lower bound, YYYY-MM-DD." },
+  date_to: { type: "string", description: "Optional inclusive business-date upper bound, YYYY-MM-DD." },
+  limit: { type: "number", description: "Maximum records. The local API clamps to 1-1000." },
+} as const
 
 const client = new LlmWikiApiClient()
 const projectBinding = new McpProjectBinding()
@@ -145,6 +157,143 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "llm_wiki_metas_records",
+      description: "Query authoritative Metas record inventories with deterministic field filters; unlike wiki search this does not depend on LLM-generated pages.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          ...METAS_FILTER_PROPERTIES,
+          record_id: { type: "string", description: "Optional exact stable record id." },
+          type: { type: "string", description: "Optional exact record type, such as feedback, idea, task, experiment, or decision." },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "llm_wiki_recent_tasks",
+      description: "List authoritative task records ordered by explicit business date; never uses filesystem modification time.",
+      inputSchema: {
+        type: "object",
+        properties: METAS_FILTER_PROPERTIES,
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "llm_wiki_person_tasks",
+      description: "List authoritative task records for one exact owner, ordered by explicit business date.",
+      inputSchema: {
+        type: "object",
+        properties: METAS_FILTER_PROPERTIES,
+        required: ["owner"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "llm_wiki_business_focus",
+      description: "Rank authoritative task records using the response's public priority/status/date score. Ideas and experiments are never promoted to tasks.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_id: METAS_FILTER_PROPERTIES.project_id,
+          meta_id: METAS_FILTER_PROPERTIES.meta_id,
+          limit: METAS_FILTER_PROPERTIES.limit,
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "llm_wiki_recent_operations",
+      description: "List authoritative operation records ordered by explicit business date.",
+      inputSchema: {
+        type: "object",
+        properties: METAS_FILTER_PROPERTIES,
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "llm_wiki_feedback_trace",
+      description: "Trace an authoritative feedback record through explicit typed relations to insights, ideas, experiments, decisions, playbooks, and metrics. Missing links are returned as knowledge gaps.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_id: METAS_FILTER_PROPERTIES.project_id,
+          meta_id: { type: "string", description: "Required stable business/meta id." },
+          record_id: { type: "string", description: "Required feedback or related record id used as the trace anchor." },
+          max_depth: { type: "number", description: "Maximum relationship depth, clamped to 1-100." },
+        },
+        required: ["meta_id", "record_id"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "llm_wiki_operation_trace",
+      description: "Trace an operation or any related authoritative record through explicit typed relations, including associated tasks and feedback when recorded.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_id: METAS_FILTER_PROPERTIES.project_id,
+          meta_id: { type: "string", description: "Required stable business/meta id." },
+          record_id: { type: "string", description: "Required operation or related record id used as the trace anchor." },
+          max_depth: { type: "number", description: "Maximum relationship depth, clamped to 1-100." },
+        },
+        required: ["meta_id", "record_id"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "llm_wiki_knowledge_gaps",
+      description: "List deterministic Metas integrity gaps such as duplicate IDs, missing dates, unknown relation types, and missing relation targets.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_id: METAS_FILTER_PROPERTIES.project_id,
+          meta_id: METAS_FILTER_PROPERTIES.meta_id,
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "llm_wiki_source_context",
+      description: "Resolve explicit related_sources to public source descriptions and local availability. Physical machine paths are never returned and remote fallback is disabled.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_id: METAS_FILTER_PROPERTIES.project_id,
+          meta_id: { type: "string", description: "Required stable business/meta id." },
+          record_id: { type: "string", description: "Optional authoritative record id; when supplied only its explicit related_sources are returned." },
+        },
+        required: ["meta_id"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "llm_wiki_businesses",
+      description: "List every synchronized Meta business with structured record counts, type distribution, latest explicit business date, source-catalog availability, and knowledge-gap count.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_id: METAS_FILTER_PROPERTIES.project_id,
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "llm_wiki_source_search",
+      description: "Search one locally bound source repository for capability evidence. Returns only logical source id, repository-relative path, line and snippet; never downloads from GitHub.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_id: METAS_FILTER_PROPERTIES.project_id,
+          meta_id: { type: "string", description: "Required stable business/meta id." },
+          source_id: { type: "string", description: "Required stable source id from the public source catalog." },
+          query: { type: "string", description: "Literal case-insensitive code text to search for." },
+          limit: { type: "number", description: "Maximum matches, clamped to 1-100." },
+        },
+        required: ["meta_id", "source_id", "query"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "llm_wiki_graph",
       description: "Query the project knowledge graph through the desktop app API.",
       inputSchema: {
@@ -250,6 +399,102 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         })
         return textResult(withActiveProject(formatSearchResults(query, search), scope.project, scope.id))
       }
+      case "llm_wiki_metas_records": {
+        await assertMcpEnabled()
+        const scope = await resolveProjectScope(args)
+        const response = await client.metasRecords(scope.id, {
+          ...metasQueryArgs(args),
+          recordId: optionalStringArg(args.record_id),
+          type: optionalStringArg(args.type),
+        })
+        return textResult(withActiveProject(JSON.stringify(response, null, 2), scope.project, scope.id))
+      }
+      case "llm_wiki_recent_tasks": {
+        await assertMcpEnabled()
+        const scope = await resolveProjectScope(args)
+        const response = await client.metasRecentTasks(scope.id, metasQueryArgs(args))
+        return textResult(withActiveProject(JSON.stringify(response, null, 2), scope.project, scope.id))
+      }
+      case "llm_wiki_person_tasks": {
+        await assertMcpEnabled()
+        const scope = await resolveProjectScope(args)
+        const owner = stringArg(args.owner, "owner")
+        const response = await client.metasPersonTasks(scope.id, { ...metasQueryArgs(args), owner })
+        return textResult(withActiveProject(JSON.stringify(response, null, 2), scope.project, scope.id))
+      }
+      case "llm_wiki_business_focus": {
+        await assertMcpEnabled()
+        const scope = await resolveProjectScope(args)
+        const response = await client.metasBusinessFocus(scope.id, {
+          metaId: optionalStringArg(args.meta_id),
+          limit: numberArg(args.limit),
+        })
+        return textResult(withActiveProject(JSON.stringify(response, null, 2), scope.project, scope.id))
+      }
+      case "llm_wiki_recent_operations": {
+        await assertMcpEnabled()
+        const scope = await resolveProjectScope(args)
+        const response = await client.metasRecentOperations(scope.id, metasQueryArgs(args))
+        return textResult(withActiveProject(JSON.stringify(response, null, 2), scope.project, scope.id))
+      }
+      case "llm_wiki_feedback_trace": {
+        await assertMcpEnabled()
+        const scope = await resolveProjectScope(args)
+        const response = await client.metasTrace(
+          scope.id,
+          "feedback-trace",
+          stringArg(args.meta_id, "meta_id"),
+          stringArg(args.record_id, "record_id"),
+          numberArg(args.max_depth),
+        )
+        return textResult(withActiveProject(JSON.stringify(response, null, 2), scope.project, scope.id))
+      }
+      case "llm_wiki_operation_trace": {
+        await assertMcpEnabled()
+        const scope = await resolveProjectScope(args)
+        const response = await client.metasTrace(
+          scope.id,
+          "operation-trace",
+          stringArg(args.meta_id, "meta_id"),
+          stringArg(args.record_id, "record_id"),
+          numberArg(args.max_depth),
+        )
+        return textResult(withActiveProject(JSON.stringify(response, null, 2), scope.project, scope.id))
+      }
+      case "llm_wiki_knowledge_gaps": {
+        await assertMcpEnabled()
+        const scope = await resolveProjectScope(args)
+        const response = await client.metasKnowledgeGaps(scope.id, optionalStringArg(args.meta_id))
+        return textResult(withActiveProject(JSON.stringify(response, null, 2), scope.project, scope.id))
+      }
+      case "llm_wiki_source_context": {
+        await assertMcpEnabled()
+        const scope = await resolveProjectScope(args)
+        const response = await client.metasSourceContext(
+          scope.id,
+          stringArg(args.meta_id, "meta_id"),
+          optionalStringArg(args.record_id),
+        )
+        return textResult(withActiveProject(JSON.stringify(response, null, 2), scope.project, scope.id))
+      }
+      case "llm_wiki_businesses": {
+        await assertMcpEnabled()
+        const scope = await resolveProjectScope(args)
+        const response = await client.metasBusinesses(scope.id)
+        return textResult(withActiveProject(JSON.stringify(response, null, 2), scope.project, scope.id))
+      }
+      case "llm_wiki_source_search": {
+        await assertMcpEnabled()
+        const scope = await resolveProjectScope(args)
+        const response = await client.metasSourceSearch(
+          scope.id,
+          stringArg(args.meta_id, "meta_id"),
+          stringArg(args.source_id, "source_id"),
+          stringArg(args.query, "query"),
+          numberArg(args.limit),
+        )
+        return textResult(withActiveProject(JSON.stringify(response, null, 2), scope.project, scope.id))
+      }
       case "llm_wiki_chat": {
         await assertMcpEnabled()
         const message = stringArg(args.message, "message")
@@ -322,6 +567,18 @@ function textResult(text: string) {
 function asObject(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {}
   return value as Record<string, unknown>
+}
+
+function metasQueryArgs(args: Record<string, unknown>): ApiMetasQueryOptions {
+  return {
+    metaId: optionalStringArg(args.meta_id),
+    owner: optionalStringArg(args.owner),
+    status: optionalStringArg(args.status),
+    priority: optionalStringArg(args.priority),
+    dateFrom: optionalStringArg(args.date_from),
+    dateTo: optionalStringArg(args.date_to),
+    limit: numberArg(args.limit),
+  }
 }
 
 async function resolveProjectScope(args: Record<string, unknown>): Promise<{ id: string; project: ApiProject | null }> {

@@ -14,6 +14,12 @@
     "test:llm": "vitest run real-llm --no-file-parallelism --reporter=verbose",
     "mcp:build": "npm --prefix mcp-server run build",
     "mcp:test": "npm --prefix mcp-server test",
+    "metas:sync": "node scripts/sync-metas-sources.mjs",
+    "metas:benchmark": "node scripts/run-metas-benchmark.mjs",
+    "metas:selfcheck": "node scripts/metas-selfcheck.mjs",
+    "metas:soak": "node scripts/metas-soak.mjs",
+    "test:metas-sync": "node --test scripts/*.node-test.mjs",
+    "metas:sync-workspace": "node scripts/sync-metas-workspace.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

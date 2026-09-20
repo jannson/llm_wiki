@@ -37,6 +37,110 @@ export interface ApiSearchResponse {
   vectorHits?: number
 }
 
+export interface ApiMetasFocusScore {
+  priority: number
+  status: number
+  businessDate: string
+  total: number
+}
+
+export interface ApiMetasRecord {
+  metaId: string
+  id: string
+  type: string
+  title: string
+  status?: string | null
+  owner?: string | null
+  priority?: string | null
+  businessDate?: string | null
+  createdAt?: string | null
+  lastVerified?: string | null
+  sourcePath: string
+  mirrorPath?: string | null
+  score?: ApiMetasFocusScore
+  relations?: ApiMetasRelation[]
+}
+
+export interface ApiMetasRelation {
+  type: string
+  targetMetaId: string
+  targetId: string
+  sourceField: string
+}
+
+export interface ApiMetasEdge {
+  metaId: string
+  sourceId: string
+  targetId: string
+  type: string
+  sourceField: string
+}
+
+export interface ApiMetasKnowledgeGap {
+  kind: string
+  metaId: string
+  recordId?: string | null
+  targetId?: string | null
+  message: string
+}
+
+export interface ApiMetasTraceResponse {
+  queryKind: string
+  anchorId: string
+  metaId: string
+  nodes: ApiMetasRecord[]
+  edges: ApiMetasEdge[]
+  knowledgeGaps: ApiMetasKnowledgeGap[]
+}
+
+export interface ApiMetasSource {
+  id: string
+  repository?: string | null
+  role?: string | null
+  lifecycle?: string | null
+  kind?: string | null
+  verifies: string[]
+  localAvailable: boolean
+}
+
+export interface ApiSourceCodeMatch {
+  sourceId: string
+  relativePath: string
+  line: number
+  snippet: string
+}
+
+export interface ApiBusinessSummary {
+  id: string
+  name: string
+  cataloged: boolean
+  hasSourceCatalog: boolean
+  recordCount: number
+  typeCounts: Record<string, number>
+  latestBusinessDate?: string | null
+  knowledgeGapCount: number
+}
+
+export interface ApiMetasResponse {
+  queryKind: string
+  count: number
+  records: ApiMetasRecord[]
+  knowledgeGaps: string[]
+  scoreFormula?: string
+}
+
+export interface ApiMetasQueryOptions {
+  metaId?: string
+  recordId?: string
+  type?: string
+  owner?: string
+  status?: string
+  priority?: string
+  dateFrom?: string
+  dateTo?: string
+  limit?: number
+}
+
 export interface ApiPageEmbeddingResult {
   path: string
   pageId: string
@@ -256,6 +360,105 @@ export class LlmWikiApiClient {
     }
   }
 
+  async metasRecords(projectId = "current", options: ApiMetasQueryOptions = {}): Promise<ApiMetasResponse> {
+    return this.metasQuery(projectId, "records", options)
+  }
+
+  async metasRecentTasks(projectId = "current", options: ApiMetasQueryOptions = {}): Promise<ApiMetasResponse> {
+    return this.metasQuery(projectId, "recent-tasks", options)
+  }
+
+  async metasPersonTasks(projectId = "current", options: ApiMetasQueryOptions = {}): Promise<ApiMetasResponse> {
+    return this.metasQuery(projectId, "person-tasks", options)
+  }
+
+  async metasBusinessFocus(projectId = "current", options: ApiMetasQueryOptions = {}): Promise<ApiMetasResponse> {
+    return this.metasQuery(projectId, "business-focus", options)
+  }
+
+  async metasRecentOperations(projectId = "current", options: ApiMetasQueryOptions = {}): Promise<ApiMetasResponse> {
+    return this.metasQuery(projectId, "recent-operations", options)
+  }
+
+  async metasTrace(projectId: string, kind: "trace" | "feedback-trace" | "operation-trace", metaId: string, recordId: string, maxDepth?: number): Promise<ApiMetasTraceResponse> {
+    const params = new URLSearchParams({ metaId, recordId })
+    if (maxDepth !== undefined) params.set("maxDepth", String(maxDepth))
+    const json = await this.request(`/projects/${encodeURIComponent(projectId)}/metas/${kind}?${params.toString()}`)
+    return {
+      queryKind: typeof json.queryKind === "string" ? json.queryKind : kind,
+      anchorId: typeof json.anchorId === "string" ? json.anchorId : recordId,
+      metaId: typeof json.metaId === "string" ? json.metaId : metaId,
+      nodes: Array.isArray(json.nodes) ? json.nodes.map(parseMetasRecord) : [],
+      edges: Array.isArray(json.edges) ? json.edges.map(parseMetasEdge) : [],
+      knowledgeGaps: Array.isArray(json.knowledgeGaps) ? json.knowledgeGaps.map(parseMetasKnowledgeGap) : [],
+    }
+  }
+
+  async metasKnowledgeGaps(projectId = "current", metaId?: string): Promise<{ count: number; knowledgeGaps: ApiMetasKnowledgeGap[] }> {
+    const params = new URLSearchParams()
+    if (metaId) params.set("metaId", metaId)
+    const suffix = params.size ? `?${params.toString()}` : ""
+    const json = await this.request(`/projects/${encodeURIComponent(projectId)}/metas/knowledge-gaps${suffix}`)
+    const knowledgeGaps = Array.isArray(json.knowledgeGaps) ? json.knowledgeGaps.map(parseMetasKnowledgeGap) : []
+    return { count: typeof json.count === "number" ? json.count : knowledgeGaps.length, knowledgeGaps }
+  }
+
+  async metasSourceContext(projectId: string, metaId: string, recordId?: string): Promise<{ sources: ApiMetasSource[]; knowledgeGaps: string[]; remoteFallback: boolean }> {
+    const params = new URLSearchParams({ metaId })
+    if (recordId) params.set("recordId", recordId)
+    const json = await this.request(`/projects/${encodeURIComponent(projectId)}/metas/source-context?${params.toString()}`)
+    return {
+      sources: Array.isArray(json.sources) ? json.sources.map(parseMetasSource) : [],
+      knowledgeGaps: Array.isArray(json.knowledgeGaps) ? json.knowledgeGaps.filter((value): value is string => typeof value === "string") : [],
+      remoteFallback: json.remoteFallback === true,
+    }
+  }
+
+  async metasSourceSearch(projectId: string, metaId: string, sourceId: string, query: string, limit?: number): Promise<{ matches: ApiSourceCodeMatch[]; knowledgeGaps: string[]; remoteFallback: boolean }> {
+    const params = new URLSearchParams({ metaId, sourceId, query })
+    if (limit !== undefined) params.set("limit", String(limit))
+    const json = await this.request(`/projects/${encodeURIComponent(projectId)}/metas/source-search?${params.toString()}`)
+    return {
+      matches: Array.isArray(json.matches) ? json.matches.map(parseSourceCodeMatch) : [],
+      knowledgeGaps: Array.isArray(json.knowledgeGaps) ? json.knowledgeGaps.filter((value): value is string => typeof value === "string") : [],
+      remoteFallback: json.remoteFallback === true,
+    }
+  }
+
+  async metasBusinesses(projectId = "current"): Promise<ApiBusinessSummary[]> {
+    const json = await this.request(`/projects/${encodeURIComponent(projectId)}/metas/businesses`)
+    return Array.isArray(json.businesses) ? json.businesses.map(parseBusinessSummary) : []
+  }
+
+  private async metasQuery(projectId: string, kind: string, options: ApiMetasQueryOptions): Promise<ApiMetasResponse> {
+    const params = new URLSearchParams()
+    const stringOptions: Array<[string, string | undefined]> = [
+      ["metaId", options.metaId],
+      ["recordId", options.recordId],
+      ["type", options.type],
+      ["owner", options.owner],
+      ["status", options.status],
+      ["priority", options.priority],
+      ["dateFrom", options.dateFrom],
+      ["dateTo", options.dateTo],
+    ]
+    for (const [key, value] of stringOptions) {
+      if (value !== undefined) params.set(key, value)
+    }
+    if (options.limit !== undefined) params.set("limit", String(options.limit))
+    const suffix = params.size > 0 ? `?${params.toString()}` : ""
+    const json = await this.request(`/projects/${encodeURIComponent(projectId)}/metas/${kind}${suffix}`)
+    return {
+      queryKind: typeof json.queryKind === "string" ? json.queryKind : kind,
+      count: typeof json.count === "number" ? json.count : 0,
+      records: Array.isArray(json.records) ? json.records.map(parseMetasRecord) : [],
+      knowledgeGaps: Array.isArray(json.knowledgeGaps)
+        ? json.knowledgeGaps.filter((value): value is string => typeof value === "string")
+        : [],
+      scoreFormula: typeof json.scoreFormula === "string" ? json.scoreFormula : undefined,
+    }
+  }
+
   async chat(projectId = "current", message: string, options: { sessionId?: string; mode?: string; topK?: number; includeContent?: boolean; wiki?: boolean; web?: boolean; anytxt?: boolean; skills?: string[]; persistSession?: boolean } = {}): Promise<ApiChatResponse> {
     const json = await this.request(`/projects/${encodeURIComponent(projectId)}/chat`, {
       method: "POST",
@@ -404,6 +607,108 @@ function parseSearchResult(value: unknown): ApiSearchResult {
       return { url: String(item.url ?? ""), alt: String(item.alt ?? "") }
     }) : [],
     vectorScore: numberOrUndefined(obj.vectorScore) ?? null,
+  }
+}
+
+function parseMetasRecord(value: unknown): ApiMetasRecord {
+  const obj = requireObject(value, "Metas record")
+  const scoreObject = obj.score && typeof obj.score === "object" && !Array.isArray(obj.score)
+    ? obj.score as Record<string, unknown>
+    : null
+  return {
+    metaId: requireString(obj.metaId, "Metas record.metaId"),
+    id: requireString(obj.id, "Metas record.id"),
+    type: requireString(obj.type, "Metas record.type"),
+    title: requireString(obj.title, "Metas record.title"),
+    status: typeof obj.status === "string" ? obj.status : null,
+    owner: typeof obj.owner === "string" ? obj.owner : null,
+    priority: typeof obj.priority === "string" ? obj.priority : null,
+    businessDate: typeof obj.businessDate === "string" ? obj.businessDate : null,
+    createdAt: typeof obj.createdAt === "string" ? obj.createdAt : null,
+    lastVerified: typeof obj.lastVerified === "string" ? obj.lastVerified : null,
+    sourcePath: requireString(obj.sourcePath, "Metas record.sourcePath"),
+    mirrorPath: typeof obj.mirrorPath === "string" ? obj.mirrorPath : null,
+    relations: Array.isArray(obj.relations) ? obj.relations.map(parseMetasRelation) : [],
+    ...(scoreObject ? {
+      score: {
+        priority: requireNumber(scoreObject.priority, "Metas record.score.priority"),
+        status: requireNumber(scoreObject.status, "Metas record.score.status"),
+        businessDate: typeof scoreObject.businessDate === "string" ? scoreObject.businessDate : "",
+        total: requireNumber(scoreObject.total, "Metas record.score.total"),
+      },
+    } : {}),
+  }
+}
+
+function parseMetasRelation(value: unknown): ApiMetasRelation {
+  const obj = requireObject(value, "Metas relation")
+  return {
+    type: requireString(obj.type, "Metas relation.type"),
+    targetMetaId: requireString(obj.targetMetaId, "Metas relation.targetMetaId"),
+    targetId: requireString(obj.targetId, "Metas relation.targetId"),
+    sourceField: requireString(obj.sourceField, "Metas relation.sourceField"),
+  }
+}
+
+function parseMetasEdge(value: unknown): ApiMetasEdge {
+  const obj = requireObject(value, "Metas edge")
+  return {
+    metaId: requireString(obj.metaId, "Metas edge.metaId"),
+    sourceId: requireString(obj.sourceId, "Metas edge.sourceId"),
+    targetId: requireString(obj.targetId, "Metas edge.targetId"),
+    type: requireString(obj.type, "Metas edge.type"),
+    sourceField: requireString(obj.sourceField, "Metas edge.sourceField"),
+  }
+}
+
+function parseMetasKnowledgeGap(value: unknown): ApiMetasKnowledgeGap {
+  const obj = requireObject(value, "Metas knowledge gap")
+  return {
+    kind: requireString(obj.kind, "Metas knowledge gap.kind"),
+    metaId: requireString(obj.metaId, "Metas knowledge gap.metaId"),
+    recordId: typeof obj.recordId === "string" ? obj.recordId : null,
+    targetId: typeof obj.targetId === "string" ? obj.targetId : null,
+    message: requireString(obj.message, "Metas knowledge gap.message"),
+  }
+}
+
+function parseMetasSource(value: unknown): ApiMetasSource {
+  const obj = requireObject(value, "Metas source")
+  return {
+    id: requireString(obj.id, "Metas source.id"),
+    repository: typeof obj.repository === "string" ? obj.repository : null,
+    role: typeof obj.role === "string" ? obj.role : null,
+    lifecycle: typeof obj.lifecycle === "string" ? obj.lifecycle : null,
+    kind: typeof obj.kind === "string" ? obj.kind : null,
+    verifies: Array.isArray(obj.verifies) ? obj.verifies.filter((value): value is string => typeof value === "string") : [],
+    localAvailable: obj.localAvailable === true,
+  }
+}
+
+function parseSourceCodeMatch(value: unknown): ApiSourceCodeMatch {
+  const obj = requireObject(value, "source code match")
+  return {
+    sourceId: requireString(obj.sourceId, "source code match.sourceId"),
+    relativePath: requireString(obj.relativePath, "source code match.relativePath"),
+    line: requireNumber(obj.line, "source code match.line"),
+    snippet: typeof obj.snippet === "string" ? obj.snippet : "",
+  }
+}
+
+function parseBusinessSummary(value: unknown): ApiBusinessSummary {
+  const obj = requireObject(value, "business summary")
+  const rawTypeCounts = obj.typeCounts && typeof obj.typeCounts === "object" && !Array.isArray(obj.typeCounts)
+    ? obj.typeCounts as Record<string, unknown>
+    : {}
+  return {
+    id: requireString(obj.id, "business summary.id"),
+    name: requireString(obj.name, "business summary.name"),
+    cataloged: obj.cataloged === true,
+    hasSourceCatalog: obj.hasSourceCatalog === true,
+    recordCount: requireNumber(obj.recordCount, "business summary.recordCount"),
+    typeCounts: Object.fromEntries(Object.entries(rawTypeCounts).filter((entry): entry is [string, number] => typeof entry[1] === "number")),
+    latestBusinessDate: typeof obj.latestBusinessDate === "string" ? obj.latestBusinessDate : null,
+    knowledgeGapCount: requireNumber(obj.knowledgeGapCount, "business summary.knowledgeGapCount"),
   }
 }
 

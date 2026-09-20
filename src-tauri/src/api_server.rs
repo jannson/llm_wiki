@@ -356,6 +356,42 @@ fn handle_request(
         }
         (&Method::Post, ["projects", project_id, "search"]) => handle_search(app, project_id, body),
         (&Method::Get, ["projects", project_id, "graph"]) => handle_graph(app, project_id, query),
+        (&Method::Get, ["projects", project_id, "metas", "records"]) => {
+            handle_metas_records(app, project_id, query, "records")
+        }
+        (&Method::Get, ["projects", project_id, "metas", "recent-tasks"]) => {
+            handle_metas_records(app, project_id, query, "recent-tasks")
+        }
+        (&Method::Get, ["projects", project_id, "metas", "person-tasks"]) => {
+            handle_metas_records(app, project_id, query, "person-tasks")
+        }
+        (&Method::Get, ["projects", project_id, "metas", "business-focus"]) => {
+            handle_metas_records(app, project_id, query, "business-focus")
+        }
+        (&Method::Get, ["projects", project_id, "metas", "recent-operations"]) => {
+            handle_metas_records(app, project_id, query, "recent-operations")
+        }
+        (&Method::Get, ["projects", project_id, "metas", "trace"]) => {
+            handle_metas_trace(app, project_id, query, "trace")
+        }
+        (&Method::Get, ["projects", project_id, "metas", "feedback-trace"]) => {
+            handle_metas_trace(app, project_id, query, "feedback-trace")
+        }
+        (&Method::Get, ["projects", project_id, "metas", "operation-trace"]) => {
+            handle_metas_trace(app, project_id, query, "operation-trace")
+        }
+        (&Method::Get, ["projects", project_id, "metas", "knowledge-gaps"]) => {
+            handle_metas_knowledge_gaps(app, project_id, query)
+        }
+        (&Method::Get, ["projects", project_id, "metas", "source-context"]) => {
+            handle_metas_source_context(app, project_id, query)
+        }
+        (&Method::Get, ["projects", project_id, "metas", "source-search"]) => {
+            handle_metas_source_search(app, project_id, query)
+        }
+        (&Method::Get, ["projects", project_id, "metas", "businesses"]) => {
+            handle_metas_businesses(app, project_id)
+        }
         (&Method::Post, ["projects", project_id, "sources", "rescan"]) => {
             handle_rescan(app, project_id)
         }
@@ -367,6 +403,320 @@ fn handle_request(
             handle_cancel_chat(app, project_id, session_id)
         }
         _ => err(404, "Not found"),
+    }
+}
+
+fn valid_iso_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+}
+
+fn handle_metas_records(
+    app: &AppHandle,
+    project_id: &str,
+    query: &str,
+    query_kind: &str,
+) -> ApiResponse {
+    let project = match resolve_project(app, project_id) {
+        Ok(project) => project,
+        Err(error) => return err(404, error),
+    };
+    let params = parse_query(query);
+    for key in ["dateFrom", "dateTo"] {
+        if let Some(value) = params.get(key) {
+            if !valid_iso_date(value) {
+                return err(400, format!("{key} must use YYYY-MM-DD"));
+            }
+        }
+    }
+    let records = match crate::metas_query::load_records(&project.path) {
+        Ok(records) => records,
+        Err(error) => return err(500, error),
+    };
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(50)
+        .clamp(1, 1_000);
+    let mut record_query = crate::metas_query::RecordQuery {
+        meta_id: params.get("metaId").cloned(),
+        record_id: params.get("recordId").cloned(),
+        record_type: params.get("type").cloned(),
+        owner: params.get("owner").cloned(),
+        status: params.get("status").cloned(),
+        priority: params.get("priority").cloned(),
+        date_from: params.get("dateFrom").cloned(),
+        date_to: params.get("dateTo").cloned(),
+        limit,
+    };
+
+    if query_kind == "business-focus" {
+        let scored = crate::metas_query::score_business_focus(records, record_query.meta_id, limit);
+        let gaps = if scored.is_empty() {
+            vec!["No authoritative task records matched; ideas and experiments were not promoted to tasks."]
+        } else {
+            Vec::new()
+        };
+        return ok(json!({
+            "ok": true,
+            "projectId": project.id,
+            "queryKind": query_kind,
+            "count": scored.len(),
+            "records": scored,
+            "knowledgeGaps": gaps,
+            "scoreFormula": "priority*1000000000 + status*100000000 + YYYYMMDD; priority critical=4/high=3/medium=2/low=1, active/running/testing=3, planned/proposed=2, blocked/on-hold=1",
+        }));
+    }
+
+    match query_kind {
+        "recent-tasks" => record_query.record_type = Some("task".into()),
+        "person-tasks" => {
+            if record_query.owner.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                return err(400, "owner is required for person-tasks");
+            }
+            record_query.record_type = Some("task".into());
+        }
+        "recent-operations" => record_query.record_type = Some("operation".into()),
+        _ => {}
+    }
+    let found = crate::metas_query::query_records(records, &record_query);
+    let mut gaps = Vec::new();
+    if found.is_empty() {
+        gaps.push(format!("No authoritative records matched {query_kind}."));
+    }
+    if found.iter().any(|record| record.business_date.is_none()) {
+        gaps.push("Some matching records have no explicit business date and sort after dated records.".into());
+    }
+    ok(json!({
+        "ok": true,
+        "projectId": project.id,
+        "queryKind": query_kind,
+        "count": found.len(),
+        "records": found,
+        "knowledgeGaps": gaps,
+    }))
+}
+
+fn handle_metas_trace(
+    app: &AppHandle,
+    project_id: &str,
+    query: &str,
+    query_kind: &str,
+) -> ApiResponse {
+    let project = match resolve_project(app, project_id) {
+        Ok(project) => project,
+        Err(error) => return err(404, error),
+    };
+    let params = parse_query(query);
+    let Some(meta_id) = params.get("metaId").filter(|value| !value.trim().is_empty()) else {
+        return err(400, "metaId is required for Metas trace queries");
+    };
+    let Some(record_id) = params.get("recordId").filter(|value| !value.trim().is_empty()) else {
+        return err(400, "recordId is required for Metas trace queries");
+    };
+    let max_depth = params
+        .get("maxDepth")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(20)
+        .clamp(1, 100);
+    let records = match crate::metas_query::load_records(&project.path) {
+        Ok(records) => records,
+        Err(error) => return err(500, error),
+    };
+    let trace = crate::metas_query::trace_records(records, meta_id, record_id, max_depth);
+    ok(json!({
+        "ok": true,
+        "projectId": project.id,
+        "queryKind": query_kind,
+        "anchorId": record_id,
+        "metaId": meta_id,
+        "maxDepth": max_depth,
+        "nodeCount": trace.nodes.len(),
+        "edgeCount": trace.edges.len(),
+        "nodes": trace.nodes,
+        "edges": trace.edges,
+        "knowledgeGaps": trace.knowledge_gaps,
+    }))
+}
+
+fn handle_metas_knowledge_gaps(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
+    let project = match resolve_project(app, project_id) {
+        Ok(project) => project,
+        Err(error) => return err(404, error),
+    };
+    let params = parse_query(query);
+    let records = match crate::metas_query::load_records(&project.path) {
+        Ok(records) => records,
+        Err(error) => return err(500, error),
+    };
+    let gaps = crate::metas_query::knowledge_gaps(
+        &records,
+        params.get("metaId").map(String::as_str),
+    );
+    ok(json!({
+        "ok": true,
+        "projectId": project.id,
+        "queryKind": "knowledge-gaps",
+        "count": gaps.len(),
+        "knowledgeGaps": gaps,
+    }))
+}
+
+fn handle_metas_source_context(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
+    let project = match resolve_project(app, project_id) {
+        Ok(project) => project,
+        Err(error) => return err(404, error),
+    };
+    let params = parse_query(query);
+    let Some(meta_id) = params.get("metaId").filter(|value| !value.trim().is_empty()) else {
+        return err(400, "metaId is required for source-context");
+    };
+    let catalog = match crate::metas_query::load_source_catalog(&project.path, meta_id) {
+        Ok(catalog) => catalog,
+        Err(error) => return ok(json!({
+            "ok": true,
+            "projectId": project.id,
+            "queryKind": "source-context",
+            "metaId": meta_id,
+            "sources": [],
+            "knowledgeGaps": [error],
+            "remoteFallback": false,
+        })),
+    };
+    let mut gaps = Vec::new();
+    let sources = if let Some(record_id) = params.get("recordId") {
+        let records = match crate::metas_query::load_records(&project.path) {
+            Ok(records) => records,
+            Err(error) => return err(500, error),
+        };
+        let record = records.iter().find(|record| {
+            record.meta_id.eq_ignore_ascii_case(meta_id)
+                && record.id.eq_ignore_ascii_case(record_id)
+        });
+        let Some(record) = record else {
+            gaps.push(format!("Record {record_id} does not exist in {meta_id}."));
+            return ok(json!({
+                "ok": true,
+                "projectId": project.id,
+                "queryKind": "source-context",
+                "metaId": meta_id,
+                "recordId": record_id,
+                "sources": [],
+                "knowledgeGaps": gaps,
+                "remoteFallback": false,
+            }));
+        };
+        if record.related_sources.is_empty() {
+            gaps.push(format!("Record {record_id} has no explicit related_sources."));
+        }
+        let selected: Vec<_> = catalog
+            .into_iter()
+            .filter(|source| record.related_sources.iter().any(|id| id.eq_ignore_ascii_case(&source.id)))
+            .collect();
+        for source_id in &record.related_sources {
+            if !selected.iter().any(|source| source.id.eq_ignore_ascii_case(source_id)) {
+                gaps.push(format!("Record {record_id} references unknown source id {source_id}."));
+            }
+        }
+        selected
+    } else {
+        catalog
+    };
+    for source in &sources {
+        if !source.local_available {
+            gaps.push(format!("Source {} has no available local binding; remote fallback is disabled.", source.id));
+        }
+    }
+    ok(json!({
+        "ok": true,
+        "projectId": project.id,
+        "queryKind": "source-context",
+        "metaId": meta_id,
+        "recordId": params.get("recordId"),
+        "count": sources.len(),
+        "sources": sources,
+        "knowledgeGaps": gaps,
+        "remoteFallback": false,
+    }))
+}
+
+fn handle_metas_source_search(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
+    let project = match resolve_project(app, project_id) {
+        Ok(project) => project,
+        Err(error) => return err(404, error),
+    };
+    let params = parse_query(query);
+    let required = |key: &str| params.get(key).filter(|value| !value.trim().is_empty());
+    let (Some(meta_id), Some(source_id), Some(search_query)) = (
+        required("metaId"),
+        required("sourceId"),
+        required("query"),
+    ) else {
+        return err(400, "metaId, sourceId, and query are required for source-search");
+    };
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(20)
+        .clamp(1, 100);
+    match crate::metas_query::search_local_source(
+        &project.path,
+        meta_id,
+        source_id,
+        search_query,
+        limit,
+    ) {
+        Ok(matches) => ok(json!({
+            "ok": true,
+            "projectId": project.id,
+            "queryKind": "source-search",
+            "metaId": meta_id,
+            "sourceId": source_id,
+            "query": search_query,
+            "count": matches.len(),
+            "matches": matches,
+            "knowledgeGaps": if matches.is_empty() { vec!["No local source matches were found."] } else { Vec::<&str>::new() },
+            "remoteFallback": false,
+        })),
+        Err(error) => ok(json!({
+            "ok": true,
+            "projectId": project.id,
+            "queryKind": "source-search",
+            "metaId": meta_id,
+            "sourceId": source_id,
+            "query": search_query,
+            "count": 0,
+            "matches": [],
+            "knowledgeGaps": [error],
+            "remoteFallback": false,
+        })),
+    }
+}
+
+fn handle_metas_businesses(app: &AppHandle, project_id: &str) -> ApiResponse {
+    let project = match resolve_project(app, project_id) {
+        Ok(project) => project,
+        Err(error) => return err(404, error),
+    };
+    let records = match crate::metas_query::load_records(&project.path) {
+        Ok(records) => records,
+        Err(error) => return err(500, error),
+    };
+    match crate::metas_query::business_summaries(&project.path, &records) {
+        Ok(businesses) => ok(json!({
+            "ok": true,
+            "projectId": project.id,
+            "queryKind": "businesses",
+            "count": businesses.len(),
+            "businesses": businesses,
+        })),
+        Err(error) => err(500, error),
     }
 }
 

@@ -67,6 +67,113 @@ test("search posts JSON body to current project", async () => {
   assert.equal(results.results[0]?.vectorScore, 0.9)
 })
 
+test("metasRecentTasks sends deterministic filters and parses authoritative records", async () => {
+  let url = ""
+  const fetchImpl = async (requestUrl: string | URL | Request): Promise<Response> => {
+    url = String(requestUrl)
+    return new Response(JSON.stringify({
+      ok: true,
+      queryKind: "recent-tasks",
+      count: 1,
+      records: [{
+        metaId: "ddnsto",
+        id: "TASK-2026-001",
+        type: "task",
+        title: "Launch task",
+        status: "active",
+        owner: "CarolChen",
+        priority: "high",
+        businessDate: "2026-09-20",
+        createdAt: "2026-09-18",
+        lastVerified: "2026-09-20",
+        sourcePath: "tasks/TASK-2026-001.md",
+        mirrorPath: "raw/sources/ddnsto/tasks/TASK-2026-001.md",
+      }],
+      knowledgeGaps: [],
+    }), { status: 200 })
+  }
+  const client = new LlmWikiApiClient({ baseUrl: "http://localhost:19828", fetchImpl })
+
+  const response = await client.metasRecentTasks("project-a", {
+    metaId: "ddnsto",
+    owner: "CarolChen",
+    status: "active",
+    dateFrom: "2026-09-01",
+    limit: 5,
+  })
+
+  assert.equal(
+    url,
+    "http://localhost:19828/api/v1/projects/project-a/metas/recent-tasks?metaId=ddnsto&owner=CarolChen&status=active&dateFrom=2026-09-01&limit=5",
+  )
+  assert.equal(response.records[0]?.id, "TASK-2026-001")
+  assert.equal(response.records[0]?.mirrorPath, "raw/sources/ddnsto/tasks/TASK-2026-001.md")
+})
+
+test("metasTrace preserves typed evidence edges and structured knowledge gaps", async () => {
+  let url = ""
+  const fetchImpl = async (requestUrl: string | URL | Request): Promise<Response> => {
+    url = String(requestUrl)
+    return new Response(JSON.stringify({
+      queryKind: "feedback-trace",
+      anchorId: "FB-1",
+      metaId: "ddnsto",
+      nodes: [{
+        metaId: "ddnsto", id: "FB-1", type: "feedback", title: "Feedback",
+        sourcePath: "feedback.md", relations: [{
+          type: "motivates", targetMetaId: "ddnsto", targetId: "IDEA-1", sourceField: "resulted_in",
+        }],
+      }],
+      edges: [{ metaId: "ddnsto", sourceId: "FB-1", targetId: "IDEA-1", type: "motivates", sourceField: "resulted_in" }],
+      knowledgeGaps: [{ kind: "unknown-relation-target", metaId: "ddnsto", recordId: "FB-1", targetId: "MISSING-1", message: "missing" }],
+    }), { status: 200 })
+  }
+  const client = new LlmWikiApiClient({ baseUrl: "http://localhost:19828", fetchImpl })
+
+  const response = await client.metasTrace("project-a", "feedback-trace", "ddnsto", "FB-1", 8)
+
+  assert.equal(url, "http://localhost:19828/api/v1/projects/project-a/metas/feedback-trace?metaId=ddnsto&recordId=FB-1&maxDepth=8")
+  assert.equal(response.nodes[0]?.relations?.[0]?.sourceField, "resulted_in")
+  assert.equal(response.edges[0]?.type, "motivates")
+  assert.equal(response.knowledgeGaps[0]?.targetId, "MISSING-1")
+})
+
+test("metasSourceSearch returns logical relative paths without requiring physical paths", async () => {
+  let url = ""
+  const fetchImpl = async (requestUrl: string | URL | Request): Promise<Response> => {
+    url = String(requestUrl)
+    return new Response(JSON.stringify({
+      matches: [{ sourceId: "ddns-fe", relativePath: "src/app.ts", line: 7, snippet: "autoScan()" }],
+      knowledgeGaps: [],
+      remoteFallback: false,
+    }), { status: 200 })
+  }
+  const client = new LlmWikiApiClient({ baseUrl: "http://localhost:19828", fetchImpl })
+
+  const response = await client.metasSourceSearch("project-a", "ddnsto", "ddns-fe", "auto scan", 4)
+
+  assert.equal(url, "http://localhost:19828/api/v1/projects/project-a/metas/source-search?metaId=ddnsto&sourceId=ddns-fe&query=auto+scan&limit=4")
+  assert.equal(response.matches[0]?.relativePath, "src/app.ts")
+  assert.equal(response.remoteFallback, false)
+})
+
+test("metasBusinesses parses cross-meta coverage and knowledge gaps", async () => {
+  const fetchImpl = async (): Promise<Response> => new Response(JSON.stringify({
+    businesses: [{
+      id: "ddnsto", name: "DDNSTO", cataloged: true, hasSourceCatalog: true,
+      recordCount: 89, typeCounts: { feedback: 83, idea: 1 },
+      latestBusinessDate: "2026-09-18", knowledgeGapCount: 93,
+    }],
+  }), { status: 200 })
+  const client = new LlmWikiApiClient({ fetchImpl })
+
+  const businesses = await client.metasBusinesses("project-a")
+
+  assert.equal(businesses[0]?.recordCount, 89)
+  assert.equal(businesses[0]?.typeCounts.feedback, 83)
+  assert.equal(businesses[0]?.hasSourceCatalog, true)
+})
+
 test("embedPage posts a project-relative wiki path", async () => {
   const fetchImpl: typeof fetch = async (input, init) => {
     assert.equal(String(input), "http://127.0.0.1:19828/api/v1/projects/project-a/pages/embed")

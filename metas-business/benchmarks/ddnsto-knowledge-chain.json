@@ -1,0 +1,45 @@
+{
+  "name": "DDNSTO explicit business knowledge chain",
+  "cases": [
+    {
+      "id": "feedback-to-playbook",
+      "category": "relationship-chain",
+      "mode": "metas-feedback-trace",
+      "params": {
+        "metaId": "ddnsto",
+        "recordId": "FB-20260901-03",
+        "maxDepth": 20
+      },
+      "expectedIds": [
+        "FB-20260901-03",
+        "INS-2026-001",
+        "IDEA-2026-001",
+        "EXP-2026-001",
+        "RESULT-2026-001",
+        "DEC-2026-001",
+        "SOP-2026-001"
+      ],
+      "expectedCount": 7
+    },
+    {
+      "id": "idea-full-chain",
+      "category": "relationship-chain",
+      "mode": "metas-trace",
+      "params": {
+        "metaId": "ddnsto",
+        "recordId": "IDEA-2026-001",
+        "maxDepth": 20
+      },
+      "expectedIds": [
+        "FB-20260901-03",
+        "INS-2026-001",
+        "IDEA-2026-001",
+        "EXP-2026-001",
+        "RESULT-2026-001",
+        "DEC-2026-001",
+        "SOP-2026-001"
+      ],
+      "expectedCount": 7
+    }
+  ]
+}

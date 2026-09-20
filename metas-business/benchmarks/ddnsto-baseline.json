@@ -1,0 +1,47 @@
+{
+  "name": "DDNSTO upstream retrieval baseline",
+  "cases": [
+    {
+      "id": "source-read",
+      "category": "authoritative-file-read",
+      "mode": "read",
+      "path": "raw/sources/ddnsto/06-ideas-商业假设/IDEA-2026-001-自动扫描降低激活摩擦.md",
+      "expectedIds": ["IDEA-2026-001"]
+    },
+    {
+      "id": "exact-record-id",
+      "category": "exact-id",
+      "mode": "search",
+      "query": "IDEA-2026-001",
+      "expectedIds": ["IDEA-2026-001"]
+    },
+    {
+      "id": "chinese-topic",
+      "category": "chinese-topic",
+      "mode": "search",
+      "query": "自动扫描 激活摩擦",
+      "expectedIds": ["INS-2026-001", "IDEA-2026-001"]
+    },
+    {
+      "id": "person-owner",
+      "category": "person",
+      "mode": "search",
+      "query": "CarolChen 最近负责什么",
+      "expectedIds": ["INS-2026-001", "IDEA-2026-001", "EXP-2026-001", "DEC-2026-001", "SOP-2026-001"]
+    },
+    {
+      "id": "recent-records",
+      "category": "recent",
+      "mode": "search",
+      "query": "2026-09-18 最近任务 实验 决策",
+      "expectedIds": ["INS-2026-001", "IDEA-2026-001", "EXP-2026-001", "RESULT-2026-001", "DEC-2026-001", "SOP-2026-001"]
+    },
+    {
+      "id": "knowledge-loop",
+      "category": "relationship-chain",
+      "mode": "graph",
+      "query": "自动扫描",
+      "expectedIds": ["INS-2026-001", "IDEA-2026-001", "EXP-2026-001", "RESULT-2026-001", "DEC-2026-001", "SOP-2026-001"]
+    }
+  ]
+}
