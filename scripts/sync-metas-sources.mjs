@@ -231,6 +231,16 @@ async function pathIsDirectory(candidate) {
   }
 }
 
+async function pathExists(candidate) {
+  try {
+    await stat(candidate)
+    return true
+  } catch (error) {
+    if (error?.code === "ENOENT") return false
+    throw error
+  }
+}
+
 async function syncSourceCatalog({ catalog, localBindings, stateRoot, projectRoot, metaId }) {
   if (!catalog) return 0
   const publicCatalog = yaml.load(await readFile(path.resolve(catalog), "utf8"), { schema: yaml.JSON_SCHEMA })
@@ -238,7 +248,7 @@ async function syncSourceCatalog({ catalog, localBindings, stateRoot, projectRoo
     throw new Error(`Source catalog meta_id must be ${metaId} and sources must be a list`)
   }
   let bindings = {}
-  if (localBindings) {
+  if (localBindings && await pathExists(path.resolve(localBindings))) {
     const local = yaml.load(await readFile(path.resolve(localBindings), "utf8"), { schema: yaml.JSON_SCHEMA })
     if (!local || local.meta_id !== metaId || !local.sources || typeof local.sources !== "object") {
       throw new Error(`Local source bindings meta_id must be ${metaId}`)

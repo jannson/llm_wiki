@@ -141,6 +141,35 @@ test("source catalog sync keeps physical paths private and exposes only availabi
   }
 })
 
+test("source catalog sync treats a missing machine-local binding file as optional", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "llm-wiki-metas-optional-binding-"))
+  const source = path.join(root, "asus-meta")
+  const project = path.join(root, "wiki-project")
+  const catalog = path.join(root, "asus.yaml")
+  const missingBindings = path.join(root, "local_asus.sources.yaml")
+  try {
+    await write(source, "README.md", "# ASUS Meta\n")
+    await writeFile(catalog, "schema_version: 1\nmeta_id: asus\nsources: []\n")
+
+    const summary = runSync(source, project, "asus", [
+      "--catalog", catalog,
+      "--local-bindings", missingBindings,
+    ])
+
+    assert.equal(summary.catalogSources, 0)
+    assert.deepEqual(
+      JSON.parse(await readFile(path.join(project, ".llm-wiki/metas-sync/asus.sources.json"), "utf8")).sources,
+      [],
+    )
+    assert.deepEqual(
+      JSON.parse(await readFile(path.join(project, ".llm-wiki/metas-local-sources/asus.json"), "utf8")).sources,
+      {},
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test("sync extracts explicit feedback rows and canonical typed relations", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "llm-wiki-metas-relations-"))
   const source = path.join(root, "ddnsto-meta")
