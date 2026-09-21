@@ -24,6 +24,7 @@ const EXCLUDED_DIRECTORIES = new Set([
   "dist",
   "target",
 ])
+const EXCLUDED_DIRECTORY_PREFIXES = ["90-source-material-", "99-archive-"]
 
 function parseArgs(argv) {
   const options = { json: false }
@@ -57,7 +58,10 @@ function normalizeRelative(relativePath) {
 }
 
 function shouldInclude(relativePath, directoryEntry) {
-  if (directoryEntry.isDirectory()) return !EXCLUDED_DIRECTORIES.has(directoryEntry.name)
+  if (directoryEntry.isDirectory()) {
+    return !EXCLUDED_DIRECTORIES.has(directoryEntry.name)
+      && !EXCLUDED_DIRECTORY_PREFIXES.some((prefix) => directoryEntry.name.startsWith(prefix))
+  }
   if (!directoryEntry.isFile()) return false
   const lowerName = directoryEntry.name.toLowerCase()
   if (lowerName.startsWith("local_") && /\.sources\.ya?ml$/.test(lowerName)) return false

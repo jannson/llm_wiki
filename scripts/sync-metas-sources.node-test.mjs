@@ -45,6 +45,8 @@ derived_from: [FB-2026-000]
     await write(source, "meta.yaml", "id: ddnsto\nname: DDNSTO\n")
     await write(source, "02-source-catalog/local_ddnsto.sources.yaml", "path: /private/source\n")
     await write(source, "04-user-feedback/feedback-template.md", "id: FB-YYYY-NNN\n")
+    await write(source, "90-source-material-原始资料/old-plan.md", "must-not-index\n")
+    await write(source, "99-archive-归档/old-decision.md", "must-not-index\n")
     await write(source, ".git/config", "must-not-copy\n")
 
     const summary = runSync(source, project)
@@ -105,6 +107,14 @@ derived_from: [FB-2026-000]
     )
     await assert.rejects(
       readFile(path.join(project, "raw/sources/ddnsto/04-user-feedback/feedback-template.md")),
+      { code: "ENOENT" },
+    )
+    await assert.rejects(
+      readFile(path.join(project, "raw/sources/ddnsto/90-source-material-原始资料/old-plan.md")),
+      { code: "ENOENT" },
+    )
+    await assert.rejects(
+      readFile(path.join(project, "raw/sources/ddnsto/99-archive-归档/old-decision.md")),
       { code: "ENOENT" },
     )
   } finally {
