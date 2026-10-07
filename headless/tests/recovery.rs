@@ -86,6 +86,50 @@ fn input(operation: &str) -> Value {
 }
 
 #[test]
+fn prepared_metadata_summary_replaces_generated_inference_without_losing_history() {
+    let mock = mock();
+    let (_d, c, p) = fixture(&mock);
+    let s = Store::open(c.clone(), p.clone()).unwrap();
+    let mut e = evidence("Only an artifact name is known; description missing".into());
+    let first = s.submit("demo", e.clone()).unwrap();
+    s.work_once().unwrap();
+    assert_eq!(mock.generation.load(Ordering::SeqCst), 1);
+    let summary = "原始说明为空，用途未知；不依据名称推断。";
+    e.source["processing_policy"] = json!({"mode":"metadata_only","summary":summary});
+    let revised = s.submit("demo", e.clone()).unwrap();
+    assert_ne!(first["job_id"], revised["job_id"]);
+    s.work_once().unwrap();
+    assert_eq!(mock.generation.load(Ordering::SeqCst), 1);
+    assert_eq!(mock.calls.lock().unwrap().len(), 2);
+    let pages = s.handle(&input("pages")).unwrap();
+    let mut read = input("read");
+    read["page_id"] = pages["pages"][0]["page_id"].clone();
+    let current = s.handle(&read).unwrap();
+    assert_eq!(current["analysis"], summary);
+    assert_eq!(current["analysis_category"], "source_metadata_summary");
+    assert_eq!(current["original"], e.content);
+    assert_eq!(
+        s.db.lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM revisions", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    drop(s);
+    let recovered = Store::open(c, p).unwrap();
+    assert_eq!(
+        recovered.submit("demo", e.clone()).unwrap()["job_id"],
+        revised["job_id"]
+    );
+    assert_eq!(
+        recovered.handle(&read).unwrap()["analysis_category"],
+        "source_metadata_summary"
+    );
+    e.source["processing_policy"]["summary"] = json!("");
+    assert!(recovered.submit("demo", e).is_err());
+}
+
+#[test]
 fn batches_recovery_and_atomic_checkpoint() {
     let mock = mock();
     let (_d, c, p) = fixture(&mock);

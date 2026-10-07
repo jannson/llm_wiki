@@ -107,6 +107,15 @@ impl Store {
         {
             return Err("evidence_invalid".into());
         }
+        if let Some(policy) = e.source.get("processing_policy") {
+            if policy["mode"] != "metadata_only"
+                || policy["summary"]
+                    .as_str()
+                    .is_none_or(|s| s.trim().is_empty() || s.chars().count() > 2000)
+            {
+                return Err("processing_policy_invalid".into());
+            }
+        }
         if e.requirements
             .iter()
             .any(|x| x.is_empty() || x.contains('*'))
@@ -207,7 +216,13 @@ impl Store {
         Ok(out)
     }
     fn public_revision(rev: &str, r: &Revision) -> Value {
-        json!({"page_id":rev,"title":r.evidence.title,"identity":r.evidence.identity,"source":r.evidence.source,"source_date":r.evidence.source_date,"evidence_category":r.evidence.evidence_category,"indexed_at":r.indexed_at,"analysis_category":"ai_analysis","profile":r.profile})
+        let analysis_category = if r.evidence.source["processing_policy"]["mode"] == "metadata_only"
+        {
+            "source_metadata_summary"
+        } else {
+            "ai_analysis"
+        };
+        json!({"page_id":rev,"title":r.evidence.title,"identity":r.evidence.identity,"source":r.evidence.source,"source_date":r.evidence.source_date,"evidence_category":r.evidence.evidence_category,"indexed_at":r.indexed_at,"analysis_category":analysis_category,"profile":r.profile})
     }
     pub fn handle(&self, input: &Value) -> Result<Value, String> {
         let grants: Vec<String> =
@@ -514,7 +529,15 @@ impl Store {
         analysis: String,
         vectors: String,
     ) -> Result<(), String> {
-        let parts = chunks(&e.content, 7000);
+        let metadata_only = e.source["processing_policy"]["mode"] == "metadata_only";
+        let parts = if metadata_only {
+            vec![e.source["processing_policy"]["summary"]
+                .as_str()
+                .ok_or("processing_policy_invalid")?
+                .to_string()]
+        } else {
+            chunks(&e.content, 7000)
+        };
         let mut summaries: Vec<String> =
             serde_json::from_str(&analysis).map_err(|_| "checkpoint_invalid")?;
         for part in parts.iter().skip(summaries.len()) {
@@ -529,7 +552,11 @@ impl Store {
                 part
             );
             // Chunk size leaves space for provenance within the generation request limit.
-            let summary = self.provider.summarize(&input)?;
+            let summary = if metadata_only {
+                part.clone()
+            } else {
+                self.provider.summarize(&input)?
+            };
             summaries.push(summary);
             let db = self.db.lock().unwrap();
             db.execute(
