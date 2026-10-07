@@ -134,7 +134,7 @@ impl Store {
             source.remove("observed_at");
         }
         let revision = digest(&format!("{}:{}", stable, self.provider.profile));
-        let db = self.db.lock().unwrap();
+        let mut db = self.db.lock().unwrap();
         let revoked: bool = db
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM revocations WHERE project=? AND identity=?)",
@@ -147,6 +147,37 @@ impl Store {
         }
         db.execute("INSERT OR IGNORE INTO jobs(project,identity,revision,profile,payload,status,updated_at) VALUES(?,?,?,?,?,'pending',?)",params![project,e.identity,revision,self.provider.profile,payload,chrono::Utc::now().to_rfc3339()]).map_err(storage)?;
         let(id,status):(i64,String)=db.query_row("SELECT id,status FROM jobs WHERE project=? AND identity=? AND revision=? AND profile=?",params![project,e.identity,revision,self.provider.profile],|r|Ok((r.get(0)?,r.get(1)?))).map_err(storage)?;
+        if status == "done" {
+            let current: Option<String> = db
+                .query_row(
+                    "SELECT revision FROM checkpoints WHERE project=? AND identity=?",
+                    params![project, e.identity],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(storage)?;
+            let pending: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE project=? AND identity=? AND id<>? AND status IN ('pending','processing','paused'))",params![project,e.identity,id],|r|r.get(0)).map_err(storage)?;
+            if current.as_deref() != Some(&revision) || pending {
+                // A source can revert to an already organized version. Publish
+                // its cached revision atomically and stop superseded work rather
+                // than retaining newer content or paying to organize it again.
+                let tx = db.transaction().map_err(storage)?;
+                tx.execute("UPDATE jobs SET status='cancelled',error='superseded_revision',updated_at=? WHERE project=? AND identity=? AND id<>? AND status IN ('pending','processing','paused')",params![chrono::Utc::now().to_rfc3339(),project,e.identity,id]).map_err(storage)?;
+                tx.execute(
+                    "UPDATE revisions SET active=0 WHERE project=? AND identity=?",
+                    params![project, e.identity],
+                )
+                .map_err(storage)?;
+                tx.execute("UPDATE revisions SET active=1 WHERE project=? AND identity=? AND revision=? AND profile=? AND revoked=0",params![project,e.identity,revision,self.provider.profile]).map_err(storage)?;
+                tx.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(project,identity) DO UPDATE SET revision=excluded.revision",params![project,e.identity,revision]).map_err(storage)?;
+                tx.execute(
+                    "UPDATE jobs SET updated_at=? WHERE id=?",
+                    params![chrono::Utc::now().to_rfc3339(), id],
+                )
+                .map_err(storage)?;
+                tx.commit().map_err(storage)?;
+            }
+        }
         Ok(json!({"job_id":id,"status":status,"revision":revision}))
     }
     fn load_active(

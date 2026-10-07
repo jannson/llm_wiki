@@ -221,6 +221,44 @@ fn persistent_pause_cancel_and_bounded_failure() {
 }
 
 #[test]
+fn source_reversion_republishes_cached_evidence_without_model_calls() {
+    let mock = mock();
+    let (_dir, c, p) = fixture(&mock);
+    let store = Store::open(c.clone(), p.clone()).unwrap();
+    let old = store
+        .submit("demo", evidence("Source version one".into()))
+        .unwrap();
+    store.work_once().unwrap();
+    store
+        .submit("demo", evidence("Source version two".into()))
+        .unwrap();
+    store.work_once().unwrap();
+    store
+        .submit("demo", evidence("Pending version three".into()))
+        .unwrap();
+    let generation = mock.generation.load(Ordering::SeqCst);
+    let embeddings = mock.calls.lock().unwrap().len();
+    let reverted = store
+        .submit("demo", evidence("Source version one".into()))
+        .unwrap();
+    assert_eq!(reverted["status"], "done");
+    assert_eq!(reverted["revision"], old["revision"]);
+    assert_eq!(
+        store.handle(&input("pages")).unwrap()["pages"][0]["page_id"],
+        old["revision"]
+    );
+    assert!(!store.work_once().unwrap());
+    drop(store);
+    let recovered = Store::open(c, p).unwrap();
+    assert_eq!(
+        recovered.handle(&input("pages")).unwrap()["pages"][0]["page_id"],
+        old["revision"]
+    );
+    assert_eq!(mock.generation.load(Ordering::SeqCst), generation);
+    assert_eq!(mock.calls.lock().unwrap().len(), embeddings);
+}
+
+#[test]
 fn source_scope_precedes_ranking_counts_and_observation_is_not_a_revision() {
     let mock = mock();
     let (_dir, mut c, p) = fixture(&mock);
@@ -232,7 +270,10 @@ fn source_scope_precedes_ranking_counts_and_observation_is_not_a_revision() {
     let store = Store::open(c, p).unwrap();
     let projects = store.handle(&input("projects")).unwrap();
     assert_eq!(projects["projects"][0]["kind"], "synthetic");
-    assert_eq!(projects["projects"][0]["description"], "Synthetic coverage only");
+    assert_eq!(
+        projects["projects"][0]["description"],
+        "Synthetic coverage only"
+    );
     assert!(!projects.to_string().contains("do-not-publish"));
     let mut denied = input("projects");
     denied["grants"] = json!([]);
