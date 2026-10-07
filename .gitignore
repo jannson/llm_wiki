@@ -49,3 +49,6 @@ pnpm-debug.log*
 # Brainstorm assets (not tracked in source control)
 .superpowers/
 .claude/
+
+# Installed company extension; maintained by metas-platform.
+/.metas-platform/

@@ -4768,6 +4768,7 @@ dependencies = [
  "image",
  "lancedb",
  "md-5",
+ "metas-wiki-query",
  "mobi",
  "notify",
  "office_oxide",
@@ -5011,6 +5012,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "metas-wiki-query"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "walkdir",
 ]
 
 [[package]]

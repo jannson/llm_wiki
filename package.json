@@ -19,7 +19,7 @@
     "metas:selfcheck": "node scripts/metas-selfcheck.mjs",
     "company:selfcheck": "node scripts/company-knowledge-selfcheck.mjs",
     "metas:soak": "node scripts/metas-soak.mjs",
-    "test:metas-sync": "node --test scripts/*.node-test.mjs",
+    "test:metas-sync": "npm --prefix .metas-platform/platform/integrations/llm-wiki test",
     "metas:sync-workspace": "node scripts/sync-metas-workspace.mjs",
     "tauri": "tauri"
   },
