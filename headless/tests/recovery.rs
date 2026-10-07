@@ -223,8 +223,20 @@ fn persistent_pause_cancel_and_bounded_failure() {
 #[test]
 fn source_scope_precedes_ranking_counts_and_observation_is_not_a_revision() {
     let mock = mock();
-    let (_dir, c, p) = fixture(&mock);
+    let (_dir, mut c, p) = fixture(&mock);
+    c.extensions = json!({"presentation":{"projects":{"demo":{
+        "kind":"synthetic","description":"Synthetic coverage only",
+        "suggested_questions":["What was actually verified?"],
+        "private_import_path":"/private/do-not-publish"
+    }}}});
     let store = Store::open(c, p).unwrap();
+    let projects = store.handle(&input("projects")).unwrap();
+    assert_eq!(projects["projects"][0]["kind"], "synthetic");
+    assert_eq!(projects["projects"][0]["description"], "Synthetic coverage only");
+    assert!(!projects.to_string().contains("do-not-publish"));
+    let mut denied = input("projects");
+    denied["grants"] = json!([]);
+    assert_eq!(store.handle(&denied).unwrap()["projects"], json!([]));
     let mut e = evidence("Restricted synthetic evidence".into());
     e.requirements.push("meta:secret-meta".into());
     e.source["observed_at"] = json!("2026-10-07T01:00:00Z");

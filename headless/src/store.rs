@@ -184,7 +184,22 @@ impl Store {
         let op = input["operation"].as_str().ok_or("operation_invalid")?;
         if op == "projects" {
             return Ok(
-                json!({"projects":self.config.projects.iter().filter(|p|allows(&p.requirements,&grants)).map(|p|json!({"id":p.id,"name":p.name})).collect::<Vec<_>>()}),
+                json!({"projects":self.config.projects.iter().filter(|p|allows(&p.requirements,&grants)).map(|p| {
+                    // Presentation is explicitly configured, never inferred from a
+                    // project name. Only these public fields cross the boundary;
+                    // import policies and private source paths remain server-side.
+                    let presentation = &self.config.extensions["presentation"]["projects"][&p.id];
+                    let kind = match presentation["kind"].as_str() {
+                        Some("synthetic") => "synthetic",
+                        _ => "knowledge",
+                    };
+                    let questions: Vec<_> = presentation["suggested_questions"].as_array()
+                        .into_iter().flatten().filter_map(|q|q.as_str())
+                        .filter(|q|q.chars().count() <= 1000).take(4).collect();
+                    json!({"id":p.id,"name":p.name,"kind":kind,
+                        "description":presentation["description"].as_str().unwrap_or(""),
+                        "suggested_questions":questions})
+                }).collect::<Vec<_>>()}),
             );
         }
         let project = input["project"].as_str().ok_or("project_missing")?;
