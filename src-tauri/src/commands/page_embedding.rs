@@ -18,7 +18,6 @@ const MIN_CHUNK_CHARS: usize = 64;
 const MAX_CHUNK_CHARS: usize = 32_000;
 const MAX_PAGE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PAGE_CHUNKS: usize = 512;
-const EMBEDDING_BATCH_SIZE: usize = 64;
 const PROVIDER_PHASE_TIMEOUT: Duration = Duration::from_secs(300);
 const REVISION_DIR: &str = ".llm-wiki/embedding-revisions";
 
@@ -230,7 +229,7 @@ async fn prepare_embedding_rows(
     // failure therefore leaves the previous, known-good page index intact.
     let mut rows = Vec::with_capacity(chunks.len());
     if supports_embedding_batch(&config) {
-        for batch in chunks.chunks(EMBEDDING_BATCH_SIZE) {
+        for batch in chunks.chunks(llm_wiki_core::limits::embedding_batch_limit(&config.model)) {
             let texts = batch
                 .iter()
                 .map(|chunk| enrich_chunk(&title, chunk))

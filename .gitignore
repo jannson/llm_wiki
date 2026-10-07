@@ -12,6 +12,7 @@ dist-rc/
 
 # Rust build artifacts
 src-tauri/target/
+/headless/target/
 
 # Tauri generated files
 src-tauri/gen/
@@ -52,3 +53,5 @@ pnpm-debug.log*
 
 # Installed company extension; maintained by metas-platform.
 /.metas-platform/
+!/headless/tests/
+!/headless/tests/**

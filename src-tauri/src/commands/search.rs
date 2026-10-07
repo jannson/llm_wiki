@@ -1,3 +1,4 @@
+use llm_wiki_core::text::{build_snippet, extract_title, is_query_separator, tokenize_query};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -882,110 +883,6 @@ fn score_file(
     })
 }
 
-pub fn tokenize_query(query: &str) -> Vec<String> {
-    let raw = query
-        .to_lowercase()
-        .split(is_query_separator)
-        .filter(|token| token.chars().count() > 1)
-        .filter(|token| !is_stop_word(token))
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-
-    let mut out = Vec::new();
-    for token in raw {
-        let chars = token.chars().collect::<Vec<_>>();
-        let has_cjk = chars.iter().any(|c| ('\u{3400}'..='\u{9fff}').contains(c));
-        if has_cjk && chars.len() > 2 {
-            for pair in chars.windows(2) {
-                out.push(pair.iter().collect());
-            }
-            for ch in &chars {
-                let s = ch.to_string();
-                if !is_stop_word(&s) {
-                    out.push(s);
-                }
-            }
-            out.push(token);
-        } else {
-            out.push(token);
-        }
-    }
-    out.into_iter()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-fn is_query_separator(c: char) -> bool {
-    c.is_whitespace()
-        || c.is_ascii_punctuation()
-        || matches!(
-            c,
-            '，' | '。'
-                | '！'
-                | '？'
-                | '、'
-                | '；'
-                | '：'
-                | '“'
-                | '”'
-                | '‘'
-                | '’'
-                | '（'
-                | '）'
-                | '·'
-                | '～'
-                | '…'
-        )
-}
-
-fn is_stop_word(token: &str) -> bool {
-    matches!(
-        token,
-        "的" | "是"
-            | "了"
-            | "什么"
-            | "在"
-            | "有"
-            | "和"
-            | "与"
-            | "对"
-            | "从"
-            | "the"
-            | "is"
-            | "a"
-            | "an"
-            | "what"
-            | "how"
-            | "are"
-            | "was"
-            | "were"
-            | "do"
-            | "does"
-            | "did"
-            | "be"
-            | "been"
-            | "being"
-            | "have"
-            | "has"
-            | "had"
-            | "it"
-            | "its"
-            | "in"
-            | "on"
-            | "at"
-            | "to"
-            | "for"
-            | "of"
-            | "with"
-            | "by"
-            | "this"
-            | "that"
-            | "these"
-            | "those"
-    )
-}
-
 fn trim_query_punctuation(value: &str) -> String {
     value.trim_matches(is_query_separator).to_string()
 }
@@ -1003,35 +900,6 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
         return 0;
     }
     haystack.match_indices(needle).count()
-}
-
-pub fn extract_title(content: &str, file_name: &str) -> String {
-    let has_frontmatter = content.starts_with("---");
-    let mut in_frontmatter = has_frontmatter;
-    let mut frontmatter_closed = false;
-    for line in content.lines().skip(if has_frontmatter { 1 } else { 0 }) {
-        let trimmed = line.trim();
-        if in_frontmatter && trimmed == "---" {
-            in_frontmatter = false;
-            frontmatter_closed = true;
-            continue;
-        }
-        if in_frontmatter && trimmed.starts_with("title:") {
-            return trimmed
-                .trim_start_matches("title:")
-                .trim()
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_string();
-        }
-        if has_frontmatter && !frontmatter_closed {
-            continue;
-        }
-        if let Some(title) = trimmed.strip_prefix("# ") {
-            return title.trim().to_string();
-        }
-    }
-    file_name.trim_end_matches(".md").replace('-', " ")
 }
 
 pub fn extract_image_refs(content: &str) -> Vec<SearchImageRef> {
@@ -1102,6 +970,19 @@ pub(crate) async fn fetch_embedding_batch(
     cfg: &SearchEmbeddingConfig,
 ) -> Result<Vec<Vec<f32>>, String> {
     if texts.is_empty() || texts.len() > 64 {
+        return Err("Embedding batch must contain between 1 and 64 inputs".into());
+    }
+    let mut embeddings = Vec::new();
+    for batch in texts.chunks(llm_wiki_core::limits::embedding_batch_limit(&cfg.model)) {
+        embeddings.extend(fetch_embedding_batch_once(batch, cfg).await?);
+    }
+    Ok(embeddings)
+}
+async fn fetch_embedding_batch_once(
+    texts: &[String],
+    cfg: &SearchEmbeddingConfig,
+) -> Result<Vec<Vec<f32>>, String> {
+    if texts.is_empty() || texts.len() > 64 {
         return Err("Embedding batch must contain between 1 and 64 inputs".to_string());
     }
     if is_google_embedding_config(cfg) || is_doubao_multimodal_embedding_config(cfg) {
@@ -1112,6 +993,7 @@ pub(crate) async fn fetch_embedding_batch(
 
     let endpoint = volcengine_embedding_endpoint(cfg);
     let mut req = crate::proxy::configure_http_client(reqwest::Client::builder())
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(
             SEARCH_EMBEDDING_TIMEOUT_SECS,
         ))
@@ -1138,8 +1020,12 @@ pub(crate) async fn fetch_embedding_batch(
             }
         }
     }
+    let mut body = json!({"model":cfg.model,"input":texts});
+    if let Some(dim) = cfg.output_dimensionality {
+        body["dimensions"] = json!(dim as u64);
+    }
     let response = req
-        .json(&json!({ "model": cfg.model, "input": texts }))
+        .json(&body)
         .send()
         .await
         .map_err(|e| format!("Embedding batch request failed: {e}"))?;
@@ -1603,37 +1489,6 @@ fn doubao_multimodal_embedding_body(model: &str, text: &str) -> Value {
         "encoding_format": "float",
         "input": [{ "type": "text", "text": text }],
     })
-}
-
-pub fn build_snippet(content: &str, query: &str) -> String {
-    let lower = content.to_lowercase();
-    let q = query.to_lowercase();
-    let idx = lower.find(&q).unwrap_or(0);
-    let char_positions: Vec<usize> = content.char_indices().map(|(idx, _)| idx).collect();
-    if char_positions.is_empty() {
-        return String::new();
-    }
-    let match_char = char_positions
-        .iter()
-        .position(|byte| *byte >= idx)
-        .unwrap_or(char_positions.len().saturating_sub(1));
-    let query_chars = query.chars().count().max(1);
-    let start_char = match_char.saturating_sub(SNIPPET_CONTEXT);
-    let end_char = (match_char + query_chars + SNIPPET_CONTEXT).min(char_positions.len());
-    let start = char_positions[start_char];
-    let end = if end_char < char_positions.len() {
-        char_positions[end_char]
-    } else {
-        content.len()
-    };
-    let mut snippet = content[start..end].replace('\n', " ");
-    if start > 0 {
-        snippet = format!("...{snippet}");
-    }
-    if end < content.len() {
-        snippet.push_str("...");
-    }
-    snippet
 }
 
 fn normalize_path(path: &str) -> String {
