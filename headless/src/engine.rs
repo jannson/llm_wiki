@@ -128,7 +128,14 @@ pub fn serve(config: Config, extension: Option<Extension>) -> Result<(), String>
                                             | "context_profile"
                                             | "generate_context"
                                     )
-                                ) {
+                                ) || store.config.extensions["private_operations"]
+                                    .as_array()
+                                    .is_some_and(|operations| {
+                                        operations
+                                            .iter()
+                                            .any(|operation| operation == &v["operation"])
+                                    })
+                                {
                                     if let Some(handler) = extension {
                                         handler(&store, &v)
                                     } else {
