@@ -120,7 +120,22 @@ pub fn serve(config: Config, extension: Option<Extension>) -> Result<(), String>
                         serde_json::from_str::<Value>(&input)
                             .map_err(|_| "invalid_request".to_string())
                             .and_then(|v| {
-                                if matches!(v["operation"].as_str(), Some("import" | "records")) {
+                                if matches!(
+                                    v["operation"].as_str(),
+                                    Some(
+                                        "import"
+                                            | "records"
+                                            | "context_profile"
+                                            | "generate_context"
+                                    )
+                                ) || store.config.extensions["private_operations"]
+                                    .as_array()
+                                    .is_some_and(|operations| {
+                                        operations
+                                            .iter()
+                                            .any(|operation| operation == &v["operation"])
+                                    })
+                                {
                                     if let Some(handler) = extension {
                                         handler(&store, &v)
                                     } else {

@@ -47,6 +47,122 @@ fn now() -> i64 {
 fn storage(_: rusqlite::Error) -> String {
     "storage_failed".into()
 }
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn explicit_lifecycle_replays_retains_history_and_hides_pending_withdrawal() {
+        let root = std::env::temp_dir().join(format!(
+            "wiki-lifecycle-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let address = server.server_addr().to_ip().unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let worker = thread::spawn(move || {
+            while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Some(mut request) = server.recv_timeout(Duration::from_millis(100)).unwrap()
+                {
+                    let mut body = String::new();
+                    request.as_reader().read_to_string(&mut body).unwrap();
+                    let input: Value = serde_json::from_str(&body).unwrap();
+                    assert!(request.url().ends_with("/embeddings"));
+                    let data: Vec<_> = input["input"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| json!({"index":i,"embedding":vec![1.0f32;1024]}))
+                        .collect();
+                    request
+                        .respond(tiny_http::Response::from_string(
+                            json!({"data":data}).to_string(),
+                        ))
+                        .unwrap();
+                }
+            }
+        });
+        let model = root.join("model.env");
+        fs::write(
+            &model,
+            format!("SERVER=http://{address}/v1\nKEY=synthetic-private-only\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&model, fs::Permissions::from_mode(0o600)).unwrap();
+        let config:Config=serde_json::from_value(json!({"socket":root.join("socket"),"database":root.join("wiki.sqlite3"),"model_file":model,"allow_local_provider":true,"projects":[{"id":"demo","name":"Synthetic","root":root.join("project"),"requirements":["project:demo"]}]})).unwrap();
+        let store = Store::open(
+            config.clone(),
+            Provider::load(&config.model_file, true).unwrap(),
+        )
+        .unwrap();
+        let grants = vec!["project:demo", "meta:alpha-meta"];
+        let mut evidence = Evidence {
+            identity: "operating:alpha-meta:alpha/STR".into(),
+            title: "Synthetic strategy".into(),
+            content: "Synthetic source strategy remains a draft, no employee acceptance.".into(),
+            source: json!({"lifecycle":{"current":true},"processing_policy":{"mode":"metadata_only","summary":"Synthetic draft strategy, not confirmed"}}),
+            source_date: Some("2026-10-09".into()),
+            evidence_category: "operating_record".into(),
+            requirements: grants.iter().map(|s| s.to_string()).collect(),
+        };
+        let first = store.submit("demo", evidence.clone()).unwrap();
+        assert!(store.work_once().unwrap());
+        for _ in 0..10 {
+            assert_eq!(
+                store.submit("demo", evidence.clone()).unwrap()["job_id"],
+                first["job_id"]
+            )
+        }
+        assert_eq!(
+            store
+                .handle(&json!({"operation":"pages","project":"demo","grants":grants}))
+                .unwrap()["pages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        evidence.source["lifecycle"]["current"] = json!(false);
+        let withdrawn = store.submit("demo", evidence.clone()).unwrap();
+        assert_eq!(
+            store
+                .handle(&json!({"operation":"pages","project":"demo","grants":grants}))
+                .unwrap()["pages"],
+            json!([])
+        );
+        // Admission hides old current facts even while the new job is pending.
+        let old=store.handle(&json!({"operation":"read","project":"demo","grants":grants,"page_id":first["revision"]})).unwrap();
+        assert_eq!(old["revision_status"], "superseded");
+        assert!(store.work_once().unwrap());
+        for _ in 0..10 {
+            assert_eq!(
+                store.submit("demo", evidence.clone()).unwrap()["job_id"],
+                withdrawn["job_id"]
+            )
+        }
+        assert_eq!(
+            store
+                .handle(&json!({"operation":"pages","project":"demo","grants":grants}))
+                .unwrap()["pages"],
+            json!([])
+        );
+        assert!(store.handle(&json!({"operation":"read","project":"demo","grants":["project:demo"],"page_id":first["revision"]})).is_err());
+        assert_eq!(store.handle(&json!({"operation":"read","project":"demo","grants":grants,"page_id":withdrawn["revision"]})).unwrap()["source"]["lifecycle"]["current"],false);
+        drop(store);
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        worker.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+}
 impl Store {
     pub fn open(config: Config, provider: Provider) -> Result<Self, String> {
         let parent = Path::new(&config.database)
@@ -116,6 +232,11 @@ impl Store {
                 return Err("processing_policy_invalid".into());
             }
         }
+        if let Some(lifecycle) = e.source.get("lifecycle") {
+            if !lifecycle["current"].is_boolean() {
+                return Err("evidence_lifecycle_invalid".into());
+            }
+        }
         if e.requirements
             .iter()
             .any(|x| x.is_empty() || x.contains('*'))
@@ -156,6 +277,16 @@ impl Store {
         }
         db.execute("INSERT OR IGNORE INTO jobs(project,identity,revision,profile,payload,status,updated_at) VALUES(?,?,?,?,?,'pending',?)",params![project,e.identity,revision,self.provider.profile,payload,chrono::Utc::now().to_rfc3339()]).map_err(storage)?;
         let(id,status):(i64,String)=db.query_row("SELECT id,status FROM jobs WHERE project=? AND identity=? AND revision=? AND profile=?",params![project,e.identity,revision,self.provider.profile],|r|Ok((r.get(0)?,r.get(1)?))).map_err(storage)?;
+        if e.source.get("lifecycle").is_some() && status != "done" {
+            // Explicit lifecycle updates invalidate prior current knowledge at
+            // admission. Index failure must not keep a withdrawn fact current.
+            // Historical citations and the prior checkpoint remain intact.
+            db.execute(
+                "UPDATE revisions SET active=0 WHERE project=? AND identity=?",
+                params![project, e.identity],
+            )
+            .map_err(storage)?;
+        }
         if status == "done" {
             let current: Option<String> = db
                 .query_row(
@@ -177,7 +308,7 @@ impl Store {
                     params![project, e.identity],
                 )
                 .map_err(storage)?;
-                tx.execute("UPDATE revisions SET active=1 WHERE project=? AND identity=? AND revision=? AND profile=? AND revoked=0",params![project,e.identity,revision,self.provider.profile]).map_err(storage)?;
+                tx.execute("UPDATE revisions SET active=? WHERE project=? AND identity=? AND revision=? AND profile=? AND revoked=0",params![e.source["lifecycle"]["current"].as_bool().unwrap_or(true),project,e.identity,revision,self.provider.profile]).map_err(storage)?;
                 tx.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(project,identity) DO UPDATE SET revision=excluded.revision",params![project,e.identity,revision]).map_err(storage)?;
                 tx.execute(
                     "UPDATE jobs SET updated_at=? WHERE id=?",
@@ -636,7 +767,7 @@ impl Store {
                 params![project, e.identity],
             )
             .map_err(storage)?;
-            tx.execute("INSERT INTO revisions(project,identity,revision,profile,payload,active) VALUES(?,?,?,?,?,1) ON CONFLICT(project,identity,revision,profile) DO UPDATE SET payload=excluded.payload,active=1,revoked=0",params![project,e.identity,revision,self.provider.profile,serde_json::to_string(&r).unwrap()]).map_err(storage)?;
+            tx.execute("INSERT INTO revisions(project,identity,revision,profile,payload,active) VALUES(?,?,?,?,?,?) ON CONFLICT(project,identity,revision,profile) DO UPDATE SET payload=excluded.payload,active=excluded.active,revoked=0",params![project,e.identity,revision,self.provider.profile,serde_json::to_string(&r).unwrap(),e.source["lifecycle"]["current"].as_bool().unwrap_or(true)]).map_err(storage)?;
             tx.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(project,identity) DO UPDATE SET revision=excluded.revision",params![project,e.identity,revision]).map_err(storage)?;
             tx.execute("UPDATE jobs SET status='done',phase='committed',error=NULL,updated_at=? WHERE id=?",params![chrono::Utc::now().to_rfc3339(),id]).map_err(storage)?;
             tx.commit().map_err(storage)?;
