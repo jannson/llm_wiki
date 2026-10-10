@@ -159,8 +159,20 @@ impl Provider {
         digest(&json!({"endpoint":self.base,"model":self.llm,"structured_version":1}).to_string())
     }
     pub fn structured(&self, instruction: &str, input: &Value) -> Result<Value, String> {
+        self.structured_bounded(instruction, input, 12000)
+    }
+    /// A caller may opt into a larger bounded context without changing the
+    /// default contract or bypassing secret/instruction/output checks.
+    pub fn structured_bounded(
+        &self,
+        instruction: &str,
+        input: &Value,
+        input_limit: usize,
+    ) -> Result<Value, String> {
         let source = input.to_string();
-        if source.chars().count() > 12000
+        if input_limit == 0
+            || input_limit > 64000
+            || source.chars().count() > input_limit
             || instruction.chars().count() > 4000
             || self.rejects_secret(&source)
             || self.rejects_secret(instruction)
@@ -267,6 +279,47 @@ mod tests {
                 .structured("schema", &json!({"source":"x".repeat(13000)}))
                 .is_err());
         }
+    }
+    #[test]
+    fn explicit_large_context_is_bounded_and_preserves_default_and_secret_checks() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/v1", server.server_addr());
+        let handle = std::thread::spawn(move || {
+            let mut request = server.recv().unwrap();
+            let mut text = String::new();
+            request.as_reader().read_to_string(&mut text).unwrap();
+            let body: Value = serde_json::from_str(&text).unwrap();
+            let sent: Value =
+                serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+            assert_eq!(sent["source"].as_str().unwrap().chars().count(), 20000);
+            request
+                .respond(tiny_http::Response::from_string(
+                    json!({"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}]})
+                        .to_string(),
+                ))
+                .unwrap();
+        });
+        let provider = Provider::new(
+            base,
+            "synthetic-private-key".into(),
+            "synthetic-model".into(),
+            "embedding".into(),
+            true,
+        )
+        .unwrap();
+        let input = json!({"source":"中".repeat(20000)});
+        assert!(provider.structured("schema", &input).is_err());
+        assert!(provider
+            .structured_bounded("schema", &input, 64001)
+            .is_err());
+        assert!(provider
+            .structured_bounded("schema", &json!({"source":"x".repeat(48001)}), 48000)
+            .is_err());
+        assert!(provider
+            .structured_bounded("schema", &json!({"secret":"synthetic-private-key"}), 48000)
+            .is_err());
+        assert!(provider.structured_bounded("schema", &input, 48000).is_ok());
+        handle.join().unwrap();
     }
     #[test]
     fn unicode_chunks_preserve_every_character() {
