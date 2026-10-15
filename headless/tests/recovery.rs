@@ -86,6 +86,178 @@ fn input(operation: &str) -> Value {
 }
 
 #[test]
+fn managed_work_selects_one_job_and_preserves_attempts_after_revocation() {
+    let mock = mock();
+    let (_d, c, p) = fixture(&mock);
+    let store = Store::open(c.clone(), p.clone())
+        .unwrap()
+        .preserve_job_attempts();
+    let old = store
+        .submit("demo", evidence("Historical backlog".into()))
+        .unwrap()["job_id"]
+        .as_i64()
+        .unwrap();
+    let mut current = evidence("Explicitly authorized document".into());
+    current.identity = "authorized".into();
+    let selected = store.submit("demo", current).unwrap()["job_id"]
+        .as_i64()
+        .unwrap();
+    // Revoke after the provider request, before its result can be checkpointed.
+    let requested = Arc::new(AtomicUsize::new(0));
+    let seen = requested.clone();
+    let guarded = store.with_work_guard(Arc::new(move |phase| {
+        if phase.starts_with("model:") {
+            seen.fetch_add(1, Ordering::SeqCst);
+        } else if seen.load(Ordering::SeqCst) > 0 {
+            return Err("authorization_revoked".into());
+        }
+        Ok(())
+    }));
+    let result = guarded.work_job(selected).unwrap();
+    assert_eq!(result["state"], "pending");
+    assert_eq!(result["attempts"], 1);
+    assert_eq!(result["error"], "authorization_revoked");
+    assert_eq!(mock.generation.load(Ordering::SeqCst), 1);
+    assert!(mock.calls.lock().unwrap().is_empty());
+    {
+        let db = store.db.lock().unwrap();
+        let old_attempts: i64 = db
+            .query_row("SELECT attempts FROM jobs WHERE id=?", [old], |r| r.get(0))
+            .unwrap();
+        let revisions: i64 = db
+            .query_row("SELECT COUNT(*) FROM revisions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((old_attempts, revisions), (0, 0));
+        db.execute("UPDATE jobs SET status='failed' WHERE id=?", [selected])
+            .unwrap();
+    }
+    drop(guarded);
+    drop(store);
+    let recovered = Store::open(c, p).unwrap().preserve_job_attempts();
+    let mut retry = input("control");
+    retry["job_id"] = json!(selected);
+    retry["action"] = json!("retry");
+    recovered.handle(&retry).unwrap();
+    let completed = recovered.work_job(selected).unwrap();
+    assert_eq!(completed["state"], "done");
+    assert_eq!(completed["attempts"], 2);
+    assert_eq!(
+        recovered.handle(&input("pages")).unwrap()["pages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let old_attempts: i64 = recovered
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT attempts FROM jobs WHERE id=?", [old], |r| r.get(0))
+        .unwrap();
+    assert_eq!(old_attempts, 0);
+}
+
+#[test]
+fn managed_repair_is_bounded_idempotent_and_guarded() {
+    let mock = mock();
+    let (_d, c, p) = fixture(&mock);
+    let store = Store::open(c.clone(), p).unwrap();
+    for n in 0..2 {
+        let mut e = evidence(format!("Document {n}"));
+        e.identity = format!("document-{n}");
+        let id = store.submit("demo", e).unwrap()["job_id"].as_i64().unwrap();
+        assert_eq!(store.work_job(id).unwrap()["state"], "done");
+    }
+    let directory = std::path::Path::new(&c.projects[0].root).join("wiki/server-pages");
+    for path in fs::read_dir(&directory).unwrap() {
+        fs::remove_file(path.unwrap().path()).unwrap();
+    }
+    let denied = store.with_work_guard(Arc::new(|_| Err("authorization_revoked".into())));
+    assert_eq!(
+        denied.repair_project_page("demo", "", 1).unwrap_err(),
+        "authorization_revoked"
+    );
+    assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
+    let first = store.repair_project_page("demo", "", 1).unwrap();
+    assert_eq!(
+        (first["checked"].as_u64(), first["written"].as_u64()),
+        (Some(1), Some(1))
+    );
+    let second = store
+        .repair_project_page("demo", first["cursor"].as_str().unwrap(), 1)
+        .unwrap();
+    assert_eq!(second["written"], 1);
+    let again = store.repair_project_page("demo", "", 2).unwrap();
+    assert_eq!(again["written"], 0);
+    assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+}
+
+#[test]
+fn externally_scheduled_reindex_requires_and_obeys_a_batch_limit() {
+    let mock = mock();
+    let (_d, c, p) = fixture(&mock);
+    let store = Store::open(c, p).unwrap();
+    for n in 0..2 {
+        let mut e = evidence(format!("Evidence {n}"));
+        e.identity = format!("doc-{n}");
+        let id = store.submit("demo", e).unwrap()["job_id"].as_i64().unwrap();
+        store.work_job(id).unwrap();
+    }
+    let mut managed = store.externally_scheduled();
+    managed.provider.profile = "synthetic-new-profile".into();
+    let mut request = input("reindex");
+    assert_eq!(
+        managed.handle(&request).unwrap_err(),
+        "background_batch_required"
+    );
+    request["limit"] = json!(1);
+    let output = managed.handle(&request).unwrap();
+    assert_eq!(output["jobs"].as_array().unwrap().len(), 1);
+    assert_eq!(output["deferred_items"], 1);
+    assert_eq!(mock.generation.load(Ordering::SeqCst), 2);
+    let count: i64 = managed
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM jobs WHERE status='pending'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn externally_scheduled_attempt_limit_is_effective_and_not_reset_on_retry() {
+    let mock = mock();
+    mock.fail_at.store(1, Ordering::SeqCst);
+    let (_d, c, p) = fixture(&mock);
+    let store = Store::open(c.clone(), p.clone())
+        .unwrap()
+        .externally_scheduled();
+    let id = store
+        .submit("demo", evidence("Bounded retry evidence".into()))
+        .unwrap()["job_id"]
+        .as_i64()
+        .unwrap();
+    let failed = store.work_job_with_limit(id, 1).unwrap();
+    assert_eq!(failed["state"], "failed");
+    assert_eq!(failed["attempts"], 1);
+    drop(store);
+    let recovered = Store::open(c, p).unwrap().externally_scheduled();
+    let mut retry = input("control");
+    retry["job_id"] = json!(id);
+    retry["action"] = json!("retry");
+    recovered.handle(&retry).unwrap();
+    let exhausted = recovered.work_job_with_limit(id, 1).unwrap();
+    assert_eq!(exhausted["state"], "failed");
+    assert_eq!(exhausted["attempts"], 1);
+    assert_eq!(exhausted["error"], "attempts_exhausted");
+    assert_eq!(mock.calls.lock().unwrap().len(), 1);
+}
+
+#[test]
 fn prepared_metadata_summary_replaces_generated_inference_without_losing_history() {
     let mock = mock();
     let (_d, c, p) = fixture(&mock);

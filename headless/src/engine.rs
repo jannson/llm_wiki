@@ -25,6 +25,24 @@ pub struct Config {
     pub extensions: Value,
 }
 pub type Extension = fn(&crate::store::Store, &Value) -> Result<Value, String>;
+
+/// Embedders can own scheduling without changing the standalone engine's
+/// behavior. Business authorization stays in their extension, outside the core.
+#[derive(Clone)]
+pub struct ServerOptions {
+    pub automatic_worker: bool,
+    pub repair_projections_on_start: bool,
+    pub private_operations: Vec<String>,
+}
+impl Default for ServerOptions {
+    fn default() -> Self {
+        Self {
+            automatic_worker: true,
+            repair_projections_on_start: true,
+            private_operations: Vec::new(),
+        }
+    }
+}
 pub fn allows(required: &[String], grants: &[String]) -> bool {
     required.iter().all(|r| {
         grants.iter().any(|g| {
@@ -35,7 +53,20 @@ pub fn allows(required: &[String], grants: &[String]) -> bool {
     })
 }
 pub fn run_from_args(extension: Option<Extension>) -> Result<(), String> {
+    run_from_args_with_options(extension, ServerOptions::default())
+}
+pub fn run_from_args_with_options(
+    extension: Option<Extension>,
+    options: ServerOptions,
+) -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "--capabilities" {
+        println!(
+            "{}",
+            json!({"background_contract":2,"bounded_work_attempts":true,"automatic_worker":options.automatic_worker,"startup_repair":options.repair_projections_on_start})
+        );
+        return Ok(());
+    }
     if args.len() != 3 || !matches!(args[1].as_str(), "--config" | "--check-config") {
         return Err("usage: llm-wiki-server --config PRIVATE_JSON".into());
     }
@@ -46,13 +77,17 @@ pub fn run_from_args(extension: Option<Extension>) -> Result<(), String> {
     }
     let config: Config = serde_json::from_slice(&raw).map_err(|_| "config_invalid")?;
     if args[1] == "--check-config" {
+        validate_config(&config)?;
         crate::provider::Provider::load(&config.model_file, config.allow_local_provider)?;
         println!("wiki_config_valid");
         return Ok(());
     }
-    serve(config, extension)
+    serve_with_options(config, extension, options)
 }
 pub fn serve(config: Config, extension: Option<Extension>) -> Result<(), String> {
+    serve_with_options(config, extension, ServerOptions::default())
+}
+fn validate_config(config: &Config) -> Result<(), String> {
     if !Path::new(&config.database).is_absolute()
         || !Path::new(&config.socket).is_absolute()
         || config.projects.is_empty()
@@ -68,6 +103,15 @@ pub fn serve(config: Config, extension: Option<Extension>) -> Result<(), String>
     {
         return Err("config_paths_invalid".into());
     }
+    Ok(())
+}
+
+pub fn serve_with_options(
+    config: Config,
+    extension: Option<Extension>,
+    options: ServerOptions,
+) -> Result<(), String> {
+    validate_config(&config)?;
     let parent = Path::new(&config.database)
         .parent()
         .ok_or("database_invalid")?;
@@ -84,9 +128,16 @@ pub fn serve(config: Config, extension: Option<Extension>) -> Result<(), String>
         .map_err(|_| "wiki_already_running")?;
     let provider =
         crate::provider::Provider::load(&config.model_file, config.allow_local_provider)?;
-    let store = crate::store::Store::open(config.clone(), provider)?;
-    store.repair_projections()?;
-    store.spawn_worker();
+    let mut store = crate::store::Store::open(config.clone(), provider)?;
+    if !options.automatic_worker {
+        store = store.externally_scheduled();
+    }
+    if options.repair_projections_on_start {
+        store.repair_projections()?;
+    }
+    if options.automatic_worker {
+        store.spawn_worker();
+    }
     let socket = Path::new(&config.socket);
     fs::create_dir_all(socket.parent().ok_or("socket_invalid")?).map_err(|_| "socket_invalid")?;
     if socket.exists() {
@@ -128,13 +179,17 @@ pub fn serve(config: Config, extension: Option<Extension>) -> Result<(), String>
                                             | "context_profile"
                                             | "generate_context"
                                     )
-                                ) || store.config.extensions["private_operations"]
-                                    .as_array()
-                                    .is_some_and(|operations| {
-                                        operations
-                                            .iter()
-                                            .any(|operation| operation == &v["operation"])
-                                    })
+                                ) || options
+                                    .private_operations
+                                    .iter()
+                                    .any(|operation| v["operation"] == operation.as_str())
+                                    || store.config.extensions["private_operations"]
+                                        .as_array()
+                                        .is_some_and(|operations| {
+                                            operations
+                                                .iter()
+                                                .any(|operation| operation == &v["operation"])
+                                        })
                                 {
                                     if let Some(handler) = extension {
                                         handler(&store, &v)

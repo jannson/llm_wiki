@@ -31,6 +31,9 @@ pub struct Store {
     pub db: Arc<Mutex<Connection>>,
     pub config: Config,
     pub provider: Provider,
+    work_guard: Option<Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>>,
+    reset_attempts_on_retry: bool,
+    require_managed_publication: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Revision {
@@ -207,7 +210,36 @@ impl Store {
             db: Arc::new(Mutex::new(db)),
             config,
             provider,
+            work_guard: None,
+            reset_attempts_on_retry: true,
+            require_managed_publication: false,
         })
+    }
+    pub fn with_work_guard(
+        &self,
+        guard: Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>,
+    ) -> Self {
+        let mut store = self.clone();
+        store.work_guard = Some(guard);
+        store
+    }
+    pub fn preserve_job_attempts(mut self) -> Self {
+        self.reset_attempts_on_retry = false;
+        self
+    }
+    pub fn externally_scheduled(mut self) -> Self {
+        self.reset_attempts_on_retry = false;
+        self.require_managed_publication = true;
+        self
+    }
+    fn check_work(&self, phase: &str) -> Result<(), String> {
+        if let Some(guard) = &self.work_guard {
+            guard(phase)?;
+        }
+        Ok(())
+    }
+    pub fn check_execution(&self, phase: &str) -> Result<(), String> {
+        self.check_work(phase)
     }
     pub fn validate_evidence(&self, e: &Evidence) -> Result<(), String> {
         if e.identity.is_empty()
@@ -254,6 +286,7 @@ impl Store {
         Ok(())
     }
     pub fn submit(&self, project: &str, e: Evidence) -> Result<Value, String> {
+        self.check_work("checkpoint")?;
         self.validate_evidence(&e)?;
         if !self.config.projects.iter().any(|p| p.id == project) {
             return Err("project_unknown".into());
@@ -278,6 +311,9 @@ impl Store {
         db.execute("INSERT OR IGNORE INTO jobs(project,identity,revision,profile,payload,status,updated_at) VALUES(?,?,?,?,?,'pending',?)",params![project,e.identity,revision,self.provider.profile,payload,chrono::Utc::now().to_rfc3339()]).map_err(storage)?;
         let(id,status):(i64,String)=db.query_row("SELECT id,status FROM jobs WHERE project=? AND identity=? AND revision=? AND profile=?",params![project,e.identity,revision,self.provider.profile],|r|Ok((r.get(0)?,r.get(1)?))).map_err(storage)?;
         if e.source.get("lifecycle").is_some() && status != "done" {
+            if self.require_managed_publication && self.work_guard.is_none() {
+                return Err("background_authorization_required".into());
+            }
             // Explicit lifecycle updates invalidate prior current knowledge at
             // admission. Index failure must not keep a withdrawn fact current.
             // Historical citations and the prior checkpoint remain intact.
@@ -298,6 +334,9 @@ impl Store {
                 .map_err(storage)?;
             let pending: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE project=? AND identity=? AND id<>? AND status IN ('pending','processing','paused'))",params![project,e.identity,id],|r|r.get(0)).map_err(storage)?;
             if current.as_deref() != Some(&revision) || pending {
+                if self.require_managed_publication && self.work_guard.is_none() {
+                    return Err("background_authorization_required".into());
+                }
                 // A source can revert to an already organized version. Publish
                 // its cached revision atomically and stop superseded work rather
                 // than retaining newer content or paying to organize it again.
@@ -474,11 +513,23 @@ impl Store {
             }
             "reindex" => {
                 let rows = self.load_active(project, &grants)?;
+                let limit = input["limit"].as_u64().map(|v| v as usize);
+                if self.require_managed_publication && limit.is_none_or(|v| !(1..=10).contains(&v))
+                {
+                    return Err("background_batch_required".into());
+                }
+                let stale: Vec<_> = rows
+                    .into_iter()
+                    .filter(|(_, r)| r.profile != self.provider.profile)
+                    .collect();
+                let total = stale.len();
                 let mut result = Vec::new();
-                for (_, r) in rows {
+                for (_, r) in stale.into_iter().take(limit.unwrap_or(usize::MAX)) {
                     result.push(self.submit(project, r.evidence)?)
                 }
-                Ok(json!({"jobs":result}))
+                Ok(
+                    json!({"jobs":result,"deferred_items":total.saturating_sub(limit.unwrap_or(total))}),
+                )
             }
             _ => Err("operation_denied".into()),
         }
@@ -490,6 +541,7 @@ impl Store {
         let rows = self.load_active(project, grants)?;
         let stale = rows.iter().any(|(_, r)| r.profile != self.provider.profile);
         let query_vector = if rows.iter().any(|(_, r)| r.profile == self.provider.profile) {
+            self.check_work("model:query")?;
             self.provider
                 .embed(&[q.to_string()])
                 .map(|mut v| v.remove(0))
@@ -596,7 +648,7 @@ impl Store {
             ("resume", "paused") | ("retry", "failed") => "pending",
             _ => return Err("job_transition_invalid".into()),
         };
-        db.execute("UPDATE jobs SET status=?,error=NULL,next_at=0,attempts=CASE WHEN ?='retry' THEN 0 ELSE attempts END,updated_at=? WHERE id=?",params![next,action,chrono::Utc::now().to_rfc3339(),id]).map_err(storage)?;
+        db.execute("UPDATE jobs SET status=?,error=NULL,next_at=0,attempts=CASE WHEN ? THEN 0 ELSE attempts END,updated_at=? WHERE id=?",params![next,self.reset_attempts_on_retry && action == "retry",chrono::Utc::now().to_rfc3339(),id]).map_err(storage)?;
         Ok(
             json!({"job_id":id,"status":next,"control":"takes effect before next checkpoint or commit"}),
         )
@@ -615,9 +667,29 @@ impl Store {
         });
     }
     pub fn work_once(&self) -> Result<bool, String> {
+        self.work_selected(None, 3)
+    }
+    pub fn work_job(&self, id: i64) -> Result<Value, String> {
+        self.work_job_with_limit(id, 3)
+    }
+    pub fn work_job_with_limit(&self, id: i64, maximum: i64) -> Result<Value, String> {
+        if !(1..=3).contains(&maximum) {
+            return Err("attempt_limit_invalid".into());
+        }
+        let processed = self.work_selected(Some(id), maximum)?;
+        let db = self.db.lock().unwrap();
+        db.query_row("SELECT project,status,phase,attempts,next_at,error FROM jobs WHERE id=?", [id], |row| {
+            Ok(json!({"job_id":id,"project":row.get::<_,String>(0)?,"state":row.get::<_,String>(1)?,"phase":row.get::<_,String>(2)?,"attempts":row.get::<_,i64>(3)?,"next_at":row.get::<_,i64>(4)?,"error":row.get::<_,Option<String>>(5)?,"processed":processed}))
+        }).map_err(storage)
+    }
+    fn work_selected(&self, selected: Option<i64>, maximum: i64) -> Result<bool, String> {
+        self.check_work("checkpoint")?;
         let job = {
             let db = self.db.lock().unwrap();
-            let row:Option<(i64,String,String,String,String,String,String)>=db.query_row("SELECT id,project,revision,payload,phase,analysis,vectors FROM jobs WHERE status='pending' AND next_at<=? ORDER BY id LIMIT 1",[now()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(storage)?;
+            if let Some(id) = selected {
+                db.execute("UPDATE jobs SET status='failed',error='attempts_exhausted' WHERE id=? AND status='pending' AND attempts>=?",params![id,maximum]).map_err(storage)?;
+            }
+            let row:Option<(i64,String,String,String,String,String,String)>=db.query_row("SELECT id,project,revision,payload,phase,analysis,vectors FROM jobs WHERE status='pending' AND next_at<=? AND (? IS NULL OR id=?) AND attempts<? ORDER BY id LIMIT 1",params![now(),selected,selected,maximum],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(storage)?;
             if let Some(ref row) = row {
                 db.execute("UPDATE jobs SET status='processing',attempts=attempts+1,updated_at=? WHERE id=?",params![chrono::Utc::now().to_rfc3339(),row.0]).map_err(storage)?;
             };
@@ -633,7 +705,7 @@ impl Store {
             let attempts: i64 = db
                 .query_row("SELECT attempts FROM jobs WHERE id=?", [id], |r| r.get(0))
                 .map_err(storage)?;
-            let status = if attempts >= 3 || error == "provider_authentication" {
+            let status = if attempts >= maximum || error == "provider_authentication" {
                 "failed"
             } else {
                 "pending"
@@ -643,6 +715,7 @@ impl Store {
         Ok(true)
     }
     fn processing(&self, id: i64) -> Result<bool, String> {
+        self.check_work("checkpoint")?;
         let db = self.db.lock().unwrap();
         db.query_row(
             "SELECT status='processing' FROM jobs WHERE id=?",
@@ -686,8 +759,10 @@ impl Store {
             let summary = if metadata_only {
                 part.clone()
             } else {
+                self.check_work(&format!("model:analysis:{id}:{}", summaries.len()))?;
                 self.provider.summarize(&input)?
             };
+            self.check_work("checkpoint")?;
             summaries.push(summary);
             let db = self.db.lock().unwrap();
             db.execute(
@@ -711,6 +786,7 @@ impl Store {
             return Err("checkpoint_invalid".into());
         }
         {
+            self.check_work("checkpoint")?;
             let db = self.db.lock().unwrap();
             db.execute(
                 "UPDATE jobs SET phase='embedding' WHERE id=? AND status='processing'",
@@ -723,7 +799,9 @@ impl Store {
                 return Ok(());
             }
             let end = (vectors.len() + 10).min(texts.len());
+            self.check_work(&format!("model:embedding:{id}:{}", vectors.len()))?;
             vectors.extend(self.provider.embed(&texts[vectors.len()..end])?);
+            self.check_work("checkpoint")?;
             let db = self.db.lock().unwrap();
             db.execute(
                 "UPDATE jobs SET vectors=?,updated_at=? WHERE id=? AND status='processing'",
@@ -743,6 +821,7 @@ impl Store {
             profile: self.provider.profile.clone(),
             indexed_at: chrono::Utc::now().to_rfc3339(),
         };
+        self.check_work("checkpoint")?;
         {
             let mut db = self.db.lock().unwrap();
             let tx = db.transaction().map_err(storage)?;
@@ -772,10 +851,29 @@ impl Store {
             tx.execute("UPDATE jobs SET status='done',phase='committed',error=NULL,updated_at=? WHERE id=?",params![chrono::Utc::now().to_rfc3339(),id]).map_err(storage)?;
             tx.commit().map_err(storage)?;
         }
-        self.materialize(project, revision, &r);
+        self.check_work("checkpoint")?;
+        if self.materialize_checked(project, revision, &r).is_err() {
+            let db = self.db.lock().unwrap();
+            db.execute(
+                "UPDATE jobs SET error='projection_unavailable' WHERE id=? AND status='done'",
+                [id],
+            )
+            .map_err(storage)?;
+        }
         Ok(())
     }
     fn materialize(&self, project: &str, revision: &str, r: &Revision) {
+        if self.materialize_checked(project, revision, r).is_err() {
+            eprintln!("wiki Markdown projection unavailable; committed database retained")
+        }
+    }
+    fn materialize_checked(
+        &self,
+        project: &str,
+        revision: &str,
+        r: &Revision,
+    ) -> Result<bool, String> {
+        self.check_work("checkpoint")?;
         let root = Path::new(
             &self
                 .config
@@ -789,6 +887,12 @@ impl Store {
         let target = dir.join(format!("{revision}.md"));
         let pending = dir.join(format!("{revision}.pending"));
         let body=format!("# {}\n\n## AI analysis\n\n{}\n\n## Original evidence\n\n{}\n\n## Provenance\n\n```json\n{}\n```\n",r.evidence.title,r.analysis,r.evidence.content,Self::public_revision(revision,r));
+        if fs::symlink_metadata(&target).is_ok_and(|metadata| !metadata.is_file()) {
+            return Err("projection_path_invalid".into());
+        }
+        if fs::read(&target).is_ok_and(|bytes| bytes == body.as_bytes()) {
+            return Ok(false);
+        }
         let result = (|| {
             use std::io::Write;
             if pending.exists() || fs::symlink_metadata(&pending).is_ok() {
@@ -801,12 +905,59 @@ impl Store {
             f.set_permissions(fs::Permissions::from_mode(0o600))?;
             f.write_all(body.as_bytes())?;
             f.sync_all()?;
+            self.check_work("checkpoint")
+                .map_err(std::io::Error::other)?;
             fs::rename(&pending, &target)?;
             fs::File::open(&dir)?.sync_all()
         })();
-        if result.is_err() {
-            eprintln!("wiki Markdown projection unavailable; committed database retained")
+        result.map_err(|_| "projection_unavailable".to_string())?;
+        Ok(true)
+    }
+    /// Resume a bounded derived-file repair without changing stored revisions.
+    pub fn repair_project_page(
+        &self,
+        project: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Value, String> {
+        self.repair_project_page_filtered(project, after, limit, &["*".into()])
+    }
+    pub fn repair_project_page_filtered(
+        &self,
+        project: &str,
+        after: &str,
+        limit: usize,
+        grants: &[String],
+    ) -> Result<Value, String> {
+        if !(1..=100).contains(&limit) || !self.config.projects.iter().any(|p| p.id == project) {
+            return Err("repair_scope_invalid".into());
         }
+        self.check_work("checkpoint")?;
+        let rows = {
+            let db = self.db.lock().unwrap();
+            let mut statement = db.prepare("SELECT revision,payload FROM revisions WHERE project=? AND revision>? ORDER BY revision LIMIT ?").map_err(storage)?;
+            let rows = statement
+                .query_map(params![project, after, limit as i64], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(storage)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(storage)?
+        };
+        let mut cursor = after.to_string();
+        let mut written = 0;
+        for (revision, payload) in &rows {
+            let value: Revision = serde_json::from_str(payload).map_err(|_| "revision_invalid")?;
+            cursor = revision.clone();
+            if !allows(&value.evidence.requirements, grants) {
+                continue;
+            }
+            if self.materialize_checked(project, revision, &value)? {
+                written += 1;
+            }
+        }
+        Ok(
+            json!({"cursor":cursor,"checked":rows.len(),"written":written,"pending":rows.len()==limit}),
+        )
     }
     pub fn repair_projections(&self) -> Result<(), String> {
         let db = self.db.lock().unwrap();
